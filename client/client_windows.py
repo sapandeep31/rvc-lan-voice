@@ -61,7 +61,8 @@ def parse_args():
                    help="write mic input and converted output to <path>_in.wav / <path>_out.wav")
     p.add_argument("--monitor", type=str, default=client_cfg.get("monitor_device_keyword", ""),
                    help="also play converted audio to an output device whose name contains this (e.g. WH-CH720N)")
-    p.add_argument("--prefill-ms", type=float, default=client_cfg.get("jitter_prefill_ms", 30))
+    p.add_argument("--prefill-ms", type=float, default=client_cfg.get("jitter_prefill_ms", 40),
+                   help="minimum jitter-buffer target in ms (fixed target with --no-adapt)")
     p.add_argument("--quiet", action="store_true", help="no periodic stats lines")
     p.add_argument("--no-adapt", dest="adapt", action="store_false",
                    help="fixed jitter target = --prefill-ms (default: adapt to measured jitter)")
@@ -93,6 +94,7 @@ RELEASE_SAMPLES = SAMPLE_RATE // 200      # target may shrink by 5 ms per contro
 # Which round-trip percentile the buffer must cover. 0.98 = clean on spiky Wi-Fi at the cost of delay;
 # 0.95 = lower delay, occasional dropout on spikes. On wired/stable links both give a small target.
 JITTER_PCTL = client_cfg.get("jitter_percentile", 0.98)
+JITTER_MARGIN_MS = client_cfg.get("jitter_margin_ms", 20)
 TRIM_MARGIN = SAMPLE_RATE // 100          # tolerate 10 ms above target before trimming
 XFADE = SAMPLE_RATE // 200                # 5 ms crossfade when trimming
 FADE_IN = np.linspace(0.0, 1.0, XFADE, dtype=np.float32)
@@ -412,7 +414,7 @@ class WindowsAudioClient:
                 self.mon_buf = self.mon_buf[-SAMPLE_RATE // 10:]
 
     def _update_target(self):
-        """Prefill target = observed jitter (p98 - median rtt over ~20 s, see JITTER_PCTL) + 10 ms,
+        """Prefill target = observed jitter (p98 - median rtt over ~20 s, see JITTER_PCTL) + JITTER_MARGIN_MS,
         between --prefill-ms and max_jitter_ms (150 ms by default).
 
         Rises immediately when jitter grows and falls by at most 5 ms per control window, so a quiet
@@ -425,7 +427,7 @@ class WindowsAudioClient:
             h = sorted(self.bridge.rtt_history)
         if len(h) >= 10:
             jitter = h[min(len(h) - 1, int(len(h) * JITTER_PCTL))] - h[len(h) // 2]
-            want = int((jitter + 10) * SAMPLE_RATE / 1000)
+            want = int((jitter + JITTER_MARGIN_MS) * SAMPLE_RATE / 1000)
             want = min(MAX_TARGET_SAMPLES, max(PREFILL_SAMPLES, want))
             self.target = want if want > self.target else max(want, self.target - RELEASE_SAMPLES)
 
