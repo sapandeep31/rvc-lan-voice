@@ -3,8 +3,10 @@
 Format: `- [mac|pc] task — files it touches`
 
 ## Up next
+- [pc] setup/windows/: install/start scripts for a Windows server host and for the client — setup/windows/
 
 ## In progress
+- [mac] setup/ for self-hosting: README (all cases), setup/mac/ install+start, setup/download_models.py — setup/README.md, setup/mac/, setup/download_models.py
 
 ## Done
 - [pc] Run client against the Mac server, report latency/errors/audio quality — client/, config.json "client" (server_ip local only)
