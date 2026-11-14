@@ -63,6 +63,10 @@ def parse_args():
                    help="also play converted audio to an output device whose name contains this (e.g. WH-CH720N)")
     p.add_argument("--prefill-ms", type=float, default=client_cfg.get("jitter_prefill_ms", 30))
     p.add_argument("--quiet", action="store_true", help="no periodic stats lines")
+    p.add_argument("--no-adapt", dest="adapt", action="store_false",
+                   help="fixed jitter target = --prefill-ms (default: adapt to measured jitter)")
+    p.add_argument("--input-wav", type=str, default="",
+                   help="test mode: stream this mono 16-bit WAV (looped, real-time paced) instead of the mic")
     return p.parse_args()
 
 
@@ -106,7 +110,8 @@ class AudioNetworkBridge:
         self._send_q = None
         self.lock = threading.Lock()
         self.rtts = []          # ms, drained by stats
-        self.rtt_history = collections.deque(maxlen=60)   # rolling, for jitter estimate
+        # Rolling rtts for the jitter estimate: ~20 s, so periodic Wi-Fi spikes stay in view.
+        self.rtt_history = collections.deque(maxlen=max(60, int(20000 / BLOCK_MS)))
         self.in_flight = 0
         self.max_in_flight_seen = 0
         self.send_drops = 0     # frames dropped because too many were in flight
@@ -259,6 +264,16 @@ class WindowsAudioClient:
         self.win_t0 = time.perf_counter()
         self.win_len = max(1.0, 4 * BLOCK_MS / 1000)
 
+        self.wav = None
+        if ARGS.input_wav:
+            with wave.open(ARGS.input_wav) as w:
+                if w.getframerate() != SAMPLE_RATE or w.getnchannels() != 1 or w.getsampwidth() != 2:
+                    raise SystemExit(f"--input-wav must be mono 16-bit {SAMPLE_RATE} Hz")
+                self.wav = np.frombuffer(w.readframes(w.getnframes()), np.int16).astype(np.float32) / 32768
+            self.wav_t0, self.wav_sent = time.perf_counter(), 0
+            logger.info(f"TEST MODE: input from {ARGS.input_wav} ({ms(len(self.wav)) / 1000:.1f} s, looped)")
+        self.e2e_log = []
+
         self.rec_in = [] if ARGS.record else None
         self.rec_out = [] if ARGS.record else None
 
@@ -296,7 +311,19 @@ class WindowsAudioClient:
         self._collect_replies()
         self._feed_output()
 
+    def _read_wav(self):
+        due = int((time.perf_counter() - self.wav_t0) * SAMPLE_RATE) - self.wav_sent
+        if due <= 0:
+            return
+        idx = (self.wav_sent + np.arange(due)) % len(self.wav)
+        self.wav_sent += due
+        self.mono_in = np.concatenate([self.mono_in, self.wav[idx]])
+
     def _read_mic(self):
+        if self.wav is not None:
+            self.input_io.readAll()   # keep the device drained; audio comes from the file
+            self._read_wav()
+            return
         avail = self.input_io.bytesAvailable()
         if avail <= 0:
             return
@@ -379,12 +406,19 @@ class WindowsAudioClient:
                 self.mon_buf = self.mon_buf[-SAMPLE_RATE // 10:]
 
     def _update_target(self):
-        """Prefill target = observed network/processing jitter (p95 - median rtt) + 10 ms, floored at --prefill-ms."""
+        """Prefill target = observed jitter (p98 - median rtt over ~20 s) + 10 ms, floored at --prefill-ms.
+
+        Rises immediately when jitter grows, falls by at most 2 ms per control window, so a quiet
+        spell between Wi-Fi spikes doesn't shrink the buffer right before the next spike.
+        """
+        if not ARGS.adapt:
+            return
         with self.bridge.lock:
             h = sorted(self.bridge.rtt_history)
         if len(h) >= 10:
-            jitter = h[int(len(h) * 0.95)] - h[len(h) // 2]
-            self.target = max(PREFILL_SAMPLES, int((jitter + 10) * SAMPLE_RATE / 1000))
+            jitter = h[min(len(h) - 1, int(len(h) * 0.98))] - h[len(h) // 2]
+            want = max(PREFILL_SAMPLES, int((jitter + 10) * SAMPLE_RATE / 1000))
+            self.target = want if want > self.target else max(want, self.target - SAMPLE_RATE // 500)
 
     def _latency_control(self, level: int):
         """Keep queued output near the prefill target.
@@ -439,6 +473,7 @@ class WindowsAudioClient:
         # plays after whatever is still queued when it lands - the queue's low point.
         out_ms = ms(min(lvl)) if lvl else 0.0
         e2e = BLOCK_MS + med + out_ms
+        self.e2e_log.append(e2e)
         logger.info(
             f"rtt med {med:.0f} p95 {p95:.0f} max {rtts[-1]:.0f} ms | in-flight max {self.bridge.max_in_flight_seen} "
             f"| queue low {out_ms:.0f} (target {ms(self.target):.0f}) ms | underruns {self.underruns} | trimmed {self.trimmed_ms:.0f} ms | dropped: out {self.overflow_ms:.0f} ms, "
@@ -491,7 +526,9 @@ def main():
         if ARGS.seconds > 0:
             summary = (f"SUMMARY chunk {CHUNK_SIZE} ({BLOCK_MS:.0f} ms): frames {client.frames_out}, "
                        f"underruns {client.underruns}, trimmed {client.trimmed_ms:.0f} ms, out dropped {client.overflow_ms:.0f} ms, "
-                       f"send drops {bridge.send_drops}, bad {client.bad_frames}, reconnects {bridge.reconnects}")
+                       f"send drops {bridge.send_drops}, bad {client.bad_frames}, reconnects {bridge.reconnects}, "
+                       f"final target {ms(client.target):.0f} ms, "
+                       f"est delay median {statistics.median(client.e2e_log) if client.e2e_log else 0:.0f} ms")
             logger.info(summary)
 
 
