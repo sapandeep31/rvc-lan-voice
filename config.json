@@ -7,10 +7,10 @@
     "default_model": "narrator",
     "default_pitch": 11,
     "default_formant": 1.8,
-    "default_index_ratio": 0.8,
+    "default_index_ratio": 0.6,
     "f0_detector": "fcpe",
     "force_fp32": false,
-    "extra_convert_size": 0.4,
+    "extra_convert_size": 1.0,
     "cross_fade_overlap_size": 0.05,
     "silent_threshold": -100
   },
