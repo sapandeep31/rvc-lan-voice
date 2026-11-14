@@ -2,6 +2,8 @@
 
 High-performance, ultra-low latency real-time AI voice conversion system designed to **offload 100% of GPU compute from your Windows gaming PC to your Mac** over local Wi-Fi.
 
+> **Setting this up on your own machines? Follow [setup/README.md](setup/README.md).** It covers a Mac or Windows server, the Windows client, and the voice models.
+
 ---
 
 ## 🚀 Why This Exists
