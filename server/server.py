@@ -75,6 +75,17 @@ app.add_middleware(
 )
 
 
+def _model_sampling_rate(weights: Path) -> int:
+    """Output sample rate the voice model was trained at (40k, 48k ...), read from the checkpoint."""
+    if weights.suffix == ".safetensors":
+        from safetensors import safe_open
+
+        with safe_open(str(weights), "pt") as f:
+            return int(json.loads(f.metadata()["config"])[-1])
+    ckpt = torch.load(str(weights), map_location="cpu", weights_only=True)
+    return int(ckpt["config"][-1])
+
+
 class SettingsUpdate(BaseModel):
     pitch: Optional[int] = None
     formant_shift: Optional[float] = None
@@ -140,19 +151,20 @@ class VoiceEngine:
         except Exception as e:
             logger.warning(f"Could not download pretrain weights automatically: {e}")
 
-        # Search for model weights (.safetensors or .pth)
-        model_files = list(models_dir.rglob("*.safetensors")) + list(models_dir.rglob("*.pth"))
-        index_files = list(models_dir.rglob("*.index"))
-
-        model_file = str(model_files[0]) if model_files else ""
-        index_file = str(index_files[0]) if index_files else ""
-
-        if not model_file:
-            # Fallback to local default if present
-            default_win_model = Path(os.path.expanduser("~/AppData/Local/AVocOrg/AVoc/model_dir/0/kafka.safetensors"))
-            if default_win_model.exists():
-                model_file = str(default_win_model)
-                index_file = str(default_win_model.parent / "added_IVF131_Flat_nprobe_1_kafka_v2.index")
+        # Each voice lives in models/<Name>/ (one .safetensors or .pth, optionally one .index);
+        # config "default_model" picks the folder by name, case-insensitive.
+        model_name = server_cfg.get("default_model", "kafka")
+        model_dirs = {d.name.lower(): d for d in models_dir.iterdir() if d.is_dir()}
+        model_dir = model_dirs.get(model_name.lower())
+        if model_dir is None:
+            raise RuntimeError(f"Voice model '{model_name}' not found; available: {sorted(model_dirs)}")
+        weights = sorted(model_dir.glob("*.safetensors")) or sorted(model_dir.glob("*.pth"))
+        if not weights:
+            raise RuntimeError(f"No .safetensors or .pth file in {model_dir}")
+        model_file = str(weights[0])
+        indexes = sorted(model_dir.glob("*.index"))
+        index_file = str(indexes[0]) if indexes else ""
+        sampling_rate = _model_sampling_rate(weights[0])
 
         logger.info(f"Using voice model: {model_file}")
         logger.info(f"Using feature index: {index_file}")
@@ -161,7 +173,7 @@ class VoiceEngine:
             id=0,
             storageDir=str(Path(model_file).parent) if model_file else "",
             voiceChangerType="RVC",
-            name="kafka",
+            name=model_name,
             description="",
             credit="",
             termsOfUseUrl="",
@@ -176,7 +188,7 @@ class VoiceEngine:
             isONNX=False,
             modelType="pyTorchRVCv2",
             modelTypeOnnx="onnxRVC",
-            samplingRate=40000,
+            samplingRate=sampling_rate,
             f0=True,
             embChannels=768,
             embOutputLayer=12,
@@ -309,6 +321,7 @@ def health():
     return {
         "status": "healthy",
         "device": engine.device_name,
+        "model": engine.model_info.name if engine.model_info else None,
         "pitch": engine.current_pitch,
         "formant": engine.current_formant,
         "index_ratio": engine.current_index_ratio,
@@ -332,6 +345,10 @@ def panel():
     return FileResponse(PANEL_PATH, media_type="text/html")
 
 
+# Gate used when the mic already removes room noise upstream: well below quiet speech (about -40 dBFS)
+UPSTREAM_SUPPRESSED_GATE_DB = -60
+
+
 class CalibrateRequest(BaseModel):
     seconds: float = 6.0
     margin_db: float = 6.0
@@ -343,6 +360,7 @@ async def calibrate_noise_gate(req: CalibrateRequest):
 
     The user stays silent while this runs; the gate goes to the loudest steady noise (95th
     percentile of per-chunk volume) plus margin_db, so fans/hum are muted but speech passes.
+    If the mic already zeroes its noise floor upstream, the gate is at least UPSTREAM_SUPPRESSED_GATE_DB.
     """
     if engine.connected_clients == 0:
         raise HTTPException(status_code=409, detail="No client is streaming; start the Windows client first")
@@ -356,14 +374,31 @@ async def calibrate_noise_gate(req: CalibrateRequest):
         engine.calibration_vols = None
     if len(vols) < 5:
         raise HTTPException(status_code=409, detail=f"Only {len(vols)} chunks arrived; is the client streaming?")
-    noise = float(np.percentile(vols, 95))
-    if noise < 1e-5:
-        raise HTTPException(status_code=409, detail="Input is digital silence: is the mic muted or the client sending zeros?")
-    noise_db = 20 * float(np.log10(noise))
-    threshold = int(round(min(max(noise_db + req.margin_db, -100), -20)))
+    vols_arr = np.array(vols)
+    silent = vols_arr < 1e-5
+    silent_share = float(silent.mean())
+    # Some mics/drivers (the TONOR + Windows enhancements) zero the noise floor before it reaches us.
+    # When most chunks are exact silence, gate on the residual noise but never below a conservative floor.
+    upstream_suppressed = silent_share >= 0.5
+    if silent.all():
+        noise_db = -120.0
+    else:
+        noise_db = 20 * float(np.log10(np.percentile(vols_arr[~silent], 95)))
+    gate_db = noise_db + req.margin_db
+    if upstream_suppressed:
+        gate_db = max(gate_db, UPSTREAM_SUPPRESSED_GATE_DB)
+    threshold = int(round(min(max(gate_db, -100), -20)))
     engine.update_settings(SettingsUpdate(silent_threshold=threshold))
-    logger.info(f"Noise gate calibrated over {len(vols)} chunks: floor {noise_db:.1f} dB -> gate {threshold} dB")
-    return {"noise_floor_db": round(noise_db, 1), "silent_threshold": threshold, "chunks": len(vols)}
+    logger.info(
+        f"Noise gate calibrated over {len(vols)} chunks ({silent_share:.0%} digital silence): "
+        f"floor {noise_db:.1f} dB -> gate {threshold} dB"
+    )
+    return {
+        "noise_floor_db": round(noise_db, 1),
+        "silent_threshold": threshold,
+        "chunks": len(vols),
+        "upstream_suppressed": upstream_suppressed,
+    }
 
 
 @app.post("/settings")

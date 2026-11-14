@@ -37,3 +37,7 @@ env/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Voice models downloaded locally (large binaries); only Kafka is tracked
+models/*
+!models/Kafka/

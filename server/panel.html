@@ -35,7 +35,7 @@
 
   <section class="card status" aria-label="Live status">
     <div class="stat"><div class="k">Windows client</div><div class="v" id="conn"><span class="dot"></span>…</div></div>
-    <div class="stat"><div class="k">Pitch detector / device</div><div class="v" id="dev">…</div></div>
+    <div class="stat"><div class="k">Voice model / device</div><div class="v" id="dev">…</div></div>
     <div class="stat"><div class="k">Processing per chunk</div><div class="v" id="proc">…</div></div>
     <div class="stat"><div class="k">Chunk length</div><div class="v" id="frame">…</div></div>
     <div class="stat" style="grid-column:1/-1"><div class="k">Mic level reaching the Mac</div><div class="meter"><div id="level"></div><div id="gate" title="Noise gate"></div></div><div class="k" style="margin-top:4px">Green = mic level, yellow line = noise gate. Below the line is muted.</div></div>
@@ -107,7 +107,7 @@ async function poll() {
     $("gate").style.left = Math.max(0, Math.min(100, (h.silent_threshold + 80) / 80 * 100)) + "%";
     if (!calibrating) $("calibrate").disabled = h.calibrating || !on;
     $("conn").innerHTML = `<span class="dot" style="background:var(${on ? "--ok" : "--muted"})"></span>${on ? "Connected" : "Not connected"}`;
-    $("dev").textContent = `${h.f0_detector} / ${h.device}`;
+    $("dev").textContent = `${h.model} / ${h.device}`;
     const frameMs = h.frame_samples ? h.frame_samples / 48 : null;
     $("frame").textContent = frameMs ? `${frameMs.toFixed(0)} ms (${h.frame_samples / 128})` : "–";
     const load = frameMs ? h.avg_inference_ms / frameMs : 0;
@@ -125,7 +125,7 @@ $("calibrate").addEventListener("click", async () => {
   try {
     const r = await fetch("/noise-gate/calibrate", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     const j = await r.json();
-    $("msg").textContent = r.ok ? `Room noise ${j.noise_floor_db} dB → gate set to ${j.silent_threshold} dB` : "Calibration failed: " + j.detail;
+    $("msg").textContent = r.ok ? (j.upstream_suppressed ? `Your mic already removes room noise; gate set to a safe ${j.silent_threshold} dB` : `Room noise ${j.noise_floor_db} dB → gate set to ${j.silent_threshold} dB`) : "Calibration failed: " + j.detail;
   } catch (e) { $("msg").textContent = "Could not reach server"; }
   calibrating = false; poll();
 });
