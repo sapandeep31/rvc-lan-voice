@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import faulthandler
+import itertools
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -86,6 +87,20 @@ def _model_sampling_rate(weights: Path) -> int:
     return int(ckpt["config"][-1])
 
 
+# Streaming state that must be per connection: what the library's realloc() and SOLA crossfade keep
+_VC_STREAM_ATTRS = ("block_frame", "sola_buffer")
+_MODEL_STREAM_ATTRS = (
+    "audio_buffer",
+    "convert_buffer",
+    "pitch_buffer",
+    "pitchf_buffer",
+    "convert_feature_size_16k",
+    "skip_head",
+    "return_length",
+    "silence_front",
+)
+
+
 class SettingsUpdate(BaseModel):
     pitch: Optional[int] = None
     formant_shift: Optional[float] = None
@@ -109,6 +124,9 @@ class VoiceEngine:
         self.connected_clients = 0
         # Noise-gate calibration: input volumes collected while the user stays silent
         self.calibration_vols: list[float] | None = None
+        # Per-connection audio history, swapped in by _switch_stream (only touched on the model thread)
+        self.streams: dict[Optional[int], dict] = {}
+        self.active_stream: Optional[int] = None
 
     def initialize(self):
         logger.info("Initializing voice conversion engine...")
@@ -226,10 +244,12 @@ class VoiceEngine:
 
         logger.info("Voice conversion engine successfully initialized and ready!")
 
-    def process_chunk(self, audio_chunk: np.ndarray) -> np.ndarray:
+    def process_chunk(self, audio_chunk: np.ndarray, stream_id: Optional[int] = None) -> np.ndarray:
         if self.vc is None:
             return audio_chunk
 
+        if stream_id != self.active_stream:
+            self._switch_stream(stream_id)
         self._ensure_block_frame(audio_chunk.shape[0])
 
         t0 = time.perf_counter()
@@ -251,6 +271,35 @@ class VoiceEngine:
 
         return result
 
+    def _switch_stream(self, stream_id: Optional[int]):
+        """Swap in a connection's own audio history (input, pitch and crossfade buffers).
+
+        The library keeps one rolling history; two clients sharing it get their chunks interleaved
+        into one stream, which chops syllables in both outputs.
+        """
+        vcmodel = self.vc.vcmodel
+        if self.active_stream in self.streams:
+            self.streams[self.active_stream] = {
+                **{a: getattr(self.vc, a) for a in _VC_STREAM_ATTRS},
+                **{a: getattr(vcmodel, a) for a in _MODEL_STREAM_ATTRS},
+            }
+        saved = self.streams.get(stream_id)
+        if saved is None:
+            self.streams[stream_id] = {}
+            self.vc.block_frame = -1  # first chunk of this stream allocates fresh buffers
+        else:
+            for a in _VC_STREAM_ATTRS:
+                setattr(self.vc, a, saved[a])
+            for a in _MODEL_STREAM_ATTRS:
+                setattr(vcmodel, a, saved[a])
+            self.vc.settings.serverReadChunkSize = self.vc.block_frame // 128
+        self.active_stream = stream_id
+
+    def drop_stream(self, stream_id: int):
+        self.streams.pop(stream_id, None)
+        if self.active_stream == stream_id:
+            self.active_stream = None
+
     def _ensure_block_frame(self, block_frame: int):
         """Resize the model's buffers to the client's frame length (client chunk_size x 128 samples).
 
@@ -261,7 +310,7 @@ class VoiceEngine:
             return
         if block_frame <= 0 or block_frame % 128 != 0:
             raise ValueError(f"Frame length {block_frame} is not a positive multiple of 128 samples")
-        logger.info(f"Client frame length changed: {self.vc.block_frame} -> {block_frame} samples")
+        logger.info(f"Allocating stream buffers for {block_frame}-sample frames (was {self.vc.block_frame})")
         self.vc.settings.serverReadChunkSize = block_frame // 128
         self.vc.block_frame = block_frame
         self.vc.vcmodel.realloc(
@@ -336,6 +385,8 @@ def health():
         "calibrating": engine.calibration_vols is not None,
     }
 
+
+_stream_ids = itertools.count(1)
 
 PANEL_PATH = Path(__file__).resolve().parent / "panel.html"
 
@@ -413,6 +464,7 @@ async def voice_websocket(websocket: WebSocket):
     client_host = websocket.client.host if websocket.client else "unknown"
     logger.info(f"Client connected from {client_host} via WebSocket")
     engine.connected_clients += 1
+    stream_id = next(_stream_ids)
 
     loop = asyncio.get_running_loop()
 
@@ -426,7 +478,7 @@ async def voice_websocket(websocket: WebSocket):
             audio_in = np.frombuffer(raw_data, dtype=np.float32)
 
             # Offload heavy synchronous GPU inference to thread pool to not block asyncio event loop
-            audio_out = await loop.run_in_executor(model_executor, engine.process_chunk, audio_in)
+            audio_out = await loop.run_in_executor(model_executor, engine.process_chunk, audio_in, stream_id)
 
             # Send back converted audio
             await websocket.send_bytes(audio_out.tobytes())
@@ -437,6 +489,7 @@ async def voice_websocket(websocket: WebSocket):
         logger.error(f"WebSocket error from {client_host}: {e}")
     finally:
         engine.connected_clients -= 1
+        await loop.run_in_executor(model_executor, engine.drop_stream, stream_id)
 
 
 def main():

@@ -5,14 +5,14 @@
     "model_dir": "models",
     "pretrain_dir": "pretrain",
     "default_model": "narrator",
-    "default_pitch": 10,
-    "default_formant": 0.7,
-    "default_index_ratio": 0.4,
+    "default_pitch": 11,
+    "default_formant": 1.8,
+    "default_index_ratio": 0.8,
     "f0_detector": "fcpe",
     "force_fp32": false,
     "extra_convert_size": 0.4,
     "cross_fade_overlap_size": 0.05,
-    "silent_threshold": -75
+    "silent_threshold": -100
   },
   "client": {
     "server_ip": "192.168.1.100",
