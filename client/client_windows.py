@@ -377,11 +377,15 @@ class WindowsAudioClient:
         if OUTPUT_GAIN != 1.0:
             y = np.clip(y * OUTPUT_GAIN, -1.0, 1.0)
         self.out_buf = np.concatenate([self.out_buf, y.astype(np.float32)])
-        max_out = self.target + 2 * BLOCK_SAMPLES   # a full frame on top of the target, plus one of slack
+        # Bursts after a Wi-Fi stall are normal: let the pause-only trim in _latency_control absorb them.
+        # Hard-drop only past a generous ceiling, and crossfade so it never clicks mid-syllable.
+        max_out = self.target + 4 * BLOCK_SAMPLES
         if len(self.out_buf) > max_out:
             drop = len(self.out_buf) - max_out
             self.overflow_ms += ms(drop)
-            self.out_buf = self.out_buf[drop:]
+            buf = self.out_buf
+            head = buf[:XFADE] * FADE_OUT + buf[drop:drop + XFADE] * FADE_IN
+            self.out_buf = np.concatenate([head, buf[drop + XFADE:]]).astype(np.float32)
 
     def _feed_output(self):
         if not self.playing:
