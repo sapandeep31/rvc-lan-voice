@@ -97,6 +97,7 @@ JITTER_PCTL = client_cfg.get("jitter_percentile", 0.98)
 JITTER_MARGIN_MS = client_cfg.get("jitter_margin_ms", 20)
 TRIM_MARGIN = SAMPLE_RATE // 100          # tolerate 10 ms above target before trimming
 XFADE = SAMPLE_RATE // 200                # 5 ms crossfade when trimming
+TRIM_QUIET_RMS = 10 ** (-50 / 20)         # only trim backlog where the audio is below -50 dBFS
 FADE_IN = np.linspace(0.0, 1.0, XFADE, dtype=np.float32)
 FADE_OUT = 1.0 - FADE_IN
 
@@ -449,11 +450,16 @@ class WindowsAudioClient:
             return
         self._update_target()
         excess = self.win_min - self.target - TRIM_MARGIN
-        self.win_min, self.win_t0 = None, now
         k = min(excess, len(self.out_buf) - XFADE)
         if k <= 0:
+            self.win_min, self.win_t0 = None, now
             return
         buf = self.out_buf
+        # Only cut during a pause: if the audio about to be removed is speech, wait and retry on the
+        # next tick (keeping the window's low point), so a trim never chops a word.
+        if np.sqrt(np.mean(buf[:k + XFADE] ** 2)) > TRIM_QUIET_RMS:
+            return
+        self.win_min, self.win_t0 = None, now
         head = buf[:XFADE] * FADE_OUT + buf[k:k + XFADE] * FADE_IN
         self.out_buf = np.concatenate([head, buf[k + XFADE:]]).astype(np.float32)
         self.trimmed_ms += ms(k)
