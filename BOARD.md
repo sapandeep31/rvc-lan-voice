@@ -8,6 +8,8 @@ Format: `- [mac|pc] task — files it touches`
 - [pc] Run client against the Mac server, report latency/errors/audio quality — client/, config.json "client" (server_ip local only)
   - done: client/.venv (Py 3.12, numpy/websockets/PySide6), run_client.bat uses it; Qt sees "Microphone (TONOR TC30)" + "CABLE Input (VB-Audio Virtual Cable)" at 48 kHz float.
   - 2026-11-14 e2e vs mac:8010: connected, 40 s live run with no errors, real-time throughput. LAN round trip median 89 ms / max 106 (budget 149). Est. mouth-to-ear ~250–300 ms. Pending: user listening check for quality/conversion.
+  - client now pipelined + adaptive jitter buffer (trims only in pauses), mic_check.bat monitors to headphones, --input-wav/--record test mode. Chunk 40 on Wi-Fi: ~200–215 ms, ~1 underrun/90 s.
+  - "cut syllables" was 2 clients sharing server audio history (mac fixed per-connection buffers). Re-measured: 0–2 % of phrase edges cut, solo and with 2 clients.
 
 ## Done
 - [mac] Get server running on Apple Silicon (venv, deps, pretrain, MPS model load) and smoke-test /health + /ws/voice; then send PC the LAN IP:port — server/, config.json "server"
