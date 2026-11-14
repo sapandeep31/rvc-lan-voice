@@ -13,7 +13,7 @@ fi
 
 PORT="${PORT:-$(.venv/bin/python -c "import json;print(json.load(open('config.json'))['server']['port'])")}"
 if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN &> /dev/null; then
-    echo "[!] Port $PORT is already in use. Pick another, e.g.:  PORT=8010 ./setup/mac/start.sh"
+    echo "[!] Port $PORT is already in use. Pick another, e.g.:  PORT=$((PORT + 10)) ./setup/mac/start.sh"
     exit 1
 fi
 

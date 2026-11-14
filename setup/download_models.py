@@ -39,13 +39,13 @@ def fetch(url: str, dest: Path, expected: str) -> None:
     print(f"  get     {url}")
     with urllib.request.urlopen(url) as r, open(tmp, "wb") as f:
         total = int(r.headers.get("Content-Length", 0))
-        done = 0
+        done, shown = 0, -1
         while block := r.read(1 << 20):
             f.write(block)
             done += len(block)
-            if total:
-                print(f"\r          {done * 100 // total:3d}% of {total >> 20} MB", end="", flush=True)
-        print()
+            if total and (pct := done * 100 // total // 10 * 10) != shown:
+                print(f"          {pct:3d}% of {total >> 20} MB", flush=True)
+                shown = pct
     actual = sha256(tmp)
     if actual != expected:
         tmp.unlink()

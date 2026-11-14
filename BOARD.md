@@ -3,12 +3,12 @@
 Format: `- [mac|pc] task — files it touches`
 
 ## Up next
-- [pc] setup/windows/: install/start scripts for a Windows server host and for the client — setup/windows/
+- [pc] Test setup/windows/*.bat on a real Windows machine (written by mac while pc was offline; untested): client install/start, and server install/start if an NVIDIA box is available — setup/windows/
 
 ## In progress
-- [mac] setup/ for self-hosting: README (all cases), setup/mac/ install+start, setup/download_models.py — setup/README.md, setup/mac/, setup/download_models.py
 
 ## Done
+- [mac] setup/: self-hosting guide, Mac install/start (tested from a fresh clone), Windows scripts (untested), model download from GitHub release models-v1 (Narrator, SHA-256 verified) — setup/
 - [pc] Run client against the Mac server, report latency/errors/audio quality — client/, config.json "client" (server_ip local only)
   - 2026-11-14 handed to user: client follows panel chunk_size, Desktop shortcuts for run_client.bat / mic_check.bat / panel. Discord/games mic = "CABLE Output (VB-Audio Virtual Cable)".
   - done: client/.venv (Py 3.12, numpy/websockets/PySide6), run_client.bat uses it; Qt sees "Microphone (TONOR TC30)" + "CABLE Input (VB-Audio Virtual Cable)" at 48 kHz float.
