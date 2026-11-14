@@ -86,8 +86,13 @@ PASSTHROUGH = client_cfg.get("passthrough_when_disconnected", False)
 BLOCK_SAMPLES = CHUNK_SIZE * 128
 BLOCK_MS = BLOCK_SAMPLES / SAMPLE_RATE * 1000
 PREFILL_SAMPLES = int(ARGS.prefill_ms * SAMPLE_RATE / 1000)
-# Jitter buffer ceiling: a full frame on top of the prefill plus one frame of slack.
-MAX_OUT_SAMPLES = PREFILL_SAMPLES + 2 * BLOCK_SAMPLES
+MAX_TARGET_SAMPLES = int(client_cfg.get("max_jitter_ms", 150) * SAMPLE_RATE / 1000)
+# Until enough round trips are measured, start with a safe buffer rather than the floor.
+START_TARGET_SAMPLES = max(PREFILL_SAMPLES, int(80 * SAMPLE_RATE / 1000)) if ARGS.adapt else PREFILL_SAMPLES
+RELEASE_SAMPLES = SAMPLE_RATE // 200      # target may shrink by 5 ms per control window
+# Which round-trip percentile the buffer must cover. 0.98 = clean on spiky Wi-Fi at the cost of delay;
+# 0.95 = lower delay, occasional dropout on spikes. On wired/stable links both give a small target.
+JITTER_PCTL = client_cfg.get("jitter_percentile", 0.98)
 TRIM_MARGIN = SAMPLE_RATE // 100          # tolerate 10 ms above target before trimming
 XFADE = SAMPLE_RATE // 200                # 5 ms crossfade when trimming
 FADE_IN = np.linspace(0.0, 1.0, XFADE, dtype=np.float32)
@@ -259,7 +264,7 @@ class WindowsAudioClient:
         self.bad_frames = 0
         self.out_level_samples = []
         self.trimmed_ms = 0.0
-        self.target = PREFILL_SAMPLES
+        self.target = START_TARGET_SAMPLES
         self.win_min = None
         self.win_t0 = time.perf_counter()
         self.win_len = max(1.0, 4 * BLOCK_MS / 1000)
@@ -369,8 +374,9 @@ class WindowsAudioClient:
         if OUTPUT_GAIN != 1.0:
             y = np.clip(y * OUTPUT_GAIN, -1.0, 1.0)
         self.out_buf = np.concatenate([self.out_buf, y.astype(np.float32)])
-        if len(self.out_buf) > MAX_OUT_SAMPLES:
-            drop = len(self.out_buf) - MAX_OUT_SAMPLES
+        max_out = self.target + 2 * BLOCK_SAMPLES   # a full frame on top of the target, plus one of slack
+        if len(self.out_buf) > max_out:
+            drop = len(self.out_buf) - max_out
             self.overflow_ms += ms(drop)
             self.out_buf = self.out_buf[drop:]
 
@@ -406,19 +412,22 @@ class WindowsAudioClient:
                 self.mon_buf = self.mon_buf[-SAMPLE_RATE // 10:]
 
     def _update_target(self):
-        """Prefill target = observed jitter (p98 - median rtt over ~20 s) + 10 ms, floored at --prefill-ms.
+        """Prefill target = observed jitter (p98 - median rtt over ~20 s, see JITTER_PCTL) + 10 ms,
+        between --prefill-ms and max_jitter_ms (150 ms by default).
 
-        Rises immediately when jitter grows, falls by at most 2 ms per control window, so a quiet
-        spell between Wi-Fi spikes doesn't shrink the buffer right before the next spike.
+        Rises immediately when jitter grows and falls by at most 5 ms per control window, so a quiet
+        spell between Wi-Fi spikes doesn't shrink the buffer right before the next spike. The cap
+        means a rare huge spike causes one short dropout instead of adding long-lasting delay.
         """
         if not ARGS.adapt:
             return
         with self.bridge.lock:
             h = sorted(self.bridge.rtt_history)
         if len(h) >= 10:
-            jitter = h[min(len(h) - 1, int(len(h) * 0.98))] - h[len(h) // 2]
-            want = max(PREFILL_SAMPLES, int((jitter + 10) * SAMPLE_RATE / 1000))
-            self.target = want if want > self.target else max(want, self.target - SAMPLE_RATE // 500)
+            jitter = h[min(len(h) - 1, int(len(h) * JITTER_PCTL))] - h[len(h) // 2]
+            want = int((jitter + 10) * SAMPLE_RATE / 1000)
+            want = min(MAX_TARGET_SAMPLES, max(PREFILL_SAMPLES, want))
+            self.target = want if want > self.target else max(want, self.target - RELEASE_SAMPLES)
 
     def _latency_control(self, level: int):
         """Keep queued output near the prefill target.
