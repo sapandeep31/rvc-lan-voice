@@ -13,6 +13,8 @@ Format: `- [mac|pc] task — files it touches`
 - [mac] Get server running on Apple Silicon (venv, deps, pretrain, MPS model load) and smoke-test /health + /ws/voice; then send PC the LAN IP:port — server/, config.json "server"
   - a73ef4f: Py 3.12.3 via uv, voiceconversion --no-deps + CPU onnxruntime, awaited weight download, single-thread faiss (segfault fix). E2E from PC: median ~89 ms round trip vs 149 ms chunk budget, no errors.
 
+- [mac] Lower latency + control panel: adaptive frame size, fcpe + fp16 (~47 ms/chunk), crossfade 0.05 s, /panel with synced sliders, noise-gate calibration, concurrent-client crash fix — server/, config.json "server" (cc8214c, 9fdfbb2)
+
 ## Notes / handoffs
 - Mac server runs on port 8010 on this Mac (Docker holds 8000); committed config still says 8000, override locally.
-- Latency lever if wanted: smaller chunk_size on both sides (contract change, agree first). Mouth-to-ear ~250-300 ms today.
+- chunk_size is now client-only (server adapts to any multiple of 128). Today: chunk 40 (~216 ms mouth-to-Discord) on Wi-Fi; chunk 32 (~150-170 ms) once the Mac's AWDL spikes are gone (sudo ifconfig awdl0 down, user's call).
