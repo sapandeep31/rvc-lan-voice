@@ -22,6 +22,7 @@ import statistics
 import sys
 import threading
 import time
+import urllib.request
 import wave
 from pathlib import Path
 
@@ -54,8 +55,9 @@ client_cfg = config.get("client", {})
 
 def parse_args():
     p = argparse.ArgumentParser(description="RVC LAN voice client")
-    p.add_argument("--chunk", type=int, default=client_cfg.get("chunk_size", 56),
-                   help="frame size in units of 128 samples (56 = 7168 samples = 149 ms)")
+    p.add_argument("--chunk", type=int, default=None,
+                   help="fixed frame size in units of 128 samples (40 = 5120 samples = 107 ms). "
+                        "Without it the client follows the server panel's chunk_size (start: config chunk_size).")
     p.add_argument("--seconds", type=float, default=0, help="exit after N seconds (0 = run forever)")
     p.add_argument("--record", type=str, default="",
                    help="write mic input and converted output to <path>_in.wav / <path>_out.wav")
@@ -75,7 +77,9 @@ ARGS = parse_args()
 SERVER_IP = client_cfg.get("server_ip", "192.168.1.100")
 SERVER_PORT = client_cfg.get("server_port", 8000)
 SAMPLE_RATE = client_cfg.get("sample_rate", 48000)
-CHUNK_SIZE = ARGS.chunk
+FOLLOW_SERVER_CHUNK = ARGS.chunk is None
+CHUNK_SIZE = ARGS.chunk if ARGS.chunk is not None else client_cfg.get("chunk_size", 40)
+CHUNK_MIN, CHUNK_MAX = 16, 96
 OUTPUT_GAIN = client_cfg.get("output_gain", 1.5)
 INPUT_KEYWORD = client_cfg.get("input_device_keyword", "TONOR")
 OUTPUT_KEYWORD = client_cfg.get("output_device_keyword", "CABLE Input")
@@ -84,8 +88,17 @@ INPUT_BUFFER_MS = client_cfg.get("input_buffer_ms", 20)
 MAX_IN_FLIGHT = client_cfg.get("max_in_flight", 4)
 PASSTHROUGH = client_cfg.get("passthrough_when_disconnected", False)
 
-BLOCK_SAMPLES = CHUNK_SIZE * 128
+BLOCK_SAMPLES = CHUNK_SIZE * 128          # current frame size; changes when following the server panel
 BLOCK_MS = BLOCK_SAMPLES / SAMPLE_RATE * 1000
+
+
+def set_chunk(chunk: int):
+    global CHUNK_SIZE, BLOCK_SAMPLES, BLOCK_MS
+    CHUNK_SIZE = chunk
+    BLOCK_SAMPLES = chunk * 128
+    BLOCK_MS = BLOCK_SAMPLES / SAMPLE_RATE * 1000
+
+
 PREFILL_SAMPLES = int(ARGS.prefill_ms * SAMPLE_RATE / 1000)
 MAX_TARGET_SAMPLES = int(client_cfg.get("max_jitter_ms", 150) * SAMPLE_RATE / 1000)
 # Until enough round trips are measured, start with a safe buffer rather than the floor.
@@ -128,6 +141,22 @@ class AudioNetworkBridge:
         self.net_thread = threading.Thread(target=self._run, daemon=True)
         self.net_thread.start()
         self._ready.wait(5)
+        self.server_chunk = None   # chunk_size the server panel asks for (None = unknown/keep)
+        if FOLLOW_SERVER_CHUNK:
+            self.health_url = server_url.replace("ws://", "http://").rsplit("/ws/", 1)[0] + "/health"
+            threading.Thread(target=self._poll_health, daemon=True).start()
+
+    def _poll_health(self):
+        """Every ~1 s read the panel's chunk_size from /health. Missing key or failed poll = keep current."""
+        while self.is_running:
+            try:
+                with urllib.request.urlopen(self.health_url, timeout=0.8) as r:
+                    c = json.loads(r.read().decode("utf-8")).get("chunk_size")
+                if isinstance(c, int) and CHUNK_MIN <= c <= CHUNK_MAX:
+                    self.server_chunk = c
+            except Exception:
+                pass
+            time.sleep(1.0)
 
     def submit(self, frame: bytes):
         if self.loop is not None and self._send_q is not None:
@@ -347,7 +376,23 @@ class WindowsAudioClient:
         if len(self.mono_in) > BLOCK_SAMPLES * 3:   # never let input lag build up
             self.mono_in = self.mono_in[-BLOCK_SAMPLES * 3:]
 
+    def _maybe_switch_chunk(self):
+        """At a frame boundary, adopt the chunk size set on the server panel."""
+        want = self.bridge.server_chunk
+        if want is None or want == CHUNK_SIZE:
+            return
+        old_ms = BLOCK_MS
+        set_chunk(want)
+        with self.bridge.lock:   # rtt depends on frame size: start the jitter estimate fresh
+            self.bridge.rtt_history = collections.deque(maxlen=max(60, int(20000 / BLOCK_MS)))
+        self.target = max(self.target, START_TARGET_SAMPLES)
+        self.win_len = max(1.0, 4 * BLOCK_MS / 1000)
+        self.win_min, self.win_t0 = None, time.perf_counter()
+        logger.info(f"chunk size -> {want} ({old_ms:.0f} -> {BLOCK_MS:.0f} ms per frame), set from the server panel")
+
     def _dispatch_frames(self):
+        if FOLLOW_SERVER_CHUNK:
+            self._maybe_switch_chunk()
         while len(self.mono_in) >= BLOCK_SAMPLES:
             chunk = self.mono_in[:BLOCK_SAMPLES].copy()
             self.mono_in = self.mono_in[BLOCK_SAMPLES:]
@@ -365,7 +410,8 @@ class WindowsAudioClient:
             except queue.Empty:
                 break
             y = np.frombuffer(data, dtype=np.float32)
-            if len(y) != BLOCK_SAMPLES or not np.isfinite(y).all():
+            # Frames sent before a chunk-size switch may still arrive, so accept any multiple of 128.
+            if len(y) == 0 or len(y) % 128 or not np.isfinite(y).all():
                 self.bad_frames += 1
                 y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
             if self.rec_out is not None:
