@@ -2,15 +2,17 @@ import asyncio
 import json
 import logging
 import os
+import faulthandler
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import torch
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -21,6 +23,22 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger("RVC-Server")
+faulthandler.enable()  # native crashes (torch/faiss/onnx) print a Python stack instead of dying silently
+
+
+def _init_model_thread():
+    # faiss and torch each bundle OpenMP on macOS; multi-threaded faiss search segfaults in the
+    # index lookup. omp_set_num_threads is per thread, so it is set on the one thread that runs the model.
+    # Import order matters: loading faiss before voiceconversion aborts with a duplicate libomp error.
+    import voiceconversion.RVC.RVCr2  # noqa: F401
+    import faiss
+
+    faiss.omp_set_num_threads(1)
+
+
+# Every model call (init and inference) runs on this single thread: the model is not thread-safe,
+# and it keeps faiss single-threaded no matter how many clients connect.
+model_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rvc-model", initializer=_init_model_thread)
 
 # Load configuration
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
@@ -78,6 +96,8 @@ class VoiceEngine:
         self.last_inference_ms = 0.0
         self.last_vol = 0.0
         self.connected_clients = 0
+        # Noise-gate calibration: input volumes collected while the user stays silent
+        self.calibration_vols: list[float] | None = None
 
     def initialize(self):
         logger.info("Initializing voice conversion engine...")
@@ -90,12 +110,6 @@ class VoiceEngine:
         from voiceconversion.RVC.RVCr2 import RVCr2
         from voiceconversion.voice_changer_settings import VoiceChangerSettings
         from voiceconversion.VoiceChangerV2 import VoiceChangerV2
-
-        # faiss and torch each bundle OpenMP on macOS; multi-threaded faiss search segfaults
-        # in the index lookup. Single-threaded faiss is fine for one small index.
-        import faiss
-
-        faiss.omp_set_num_threads(1)
 
         # Detect best device on this machine (Mac MPS / CUDA / CPU)
         if torch.backends.mps.is_available():
@@ -215,6 +229,8 @@ class VoiceEngine:
         self.avg_inference_ms = 0.9 * self.avg_inference_ms + 0.1 * elapsed_ms
         self.last_inference_ms = elapsed_ms
         self.last_vol = float(vol)
+        if self.calibration_vols is not None:
+            self.calibration_vols.append(self.last_vol)
 
         if self.total_processed_chunks % 100 == 0:
             logger.info(
@@ -270,7 +286,7 @@ engine = VoiceEngine()
 @app.on_event("startup")
 async def startup_event():
     try:
-        await asyncio.to_thread(engine.initialize)
+        await asyncio.get_running_loop().run_in_executor(model_executor, engine.initialize)
     except Exception as e:
         logger.error(f"Failed to initialize voice engine at startup: {e}")
         logger.warning("Will retry when model files are present.")
@@ -304,6 +320,7 @@ def health():
         "input_volume": round(engine.last_vol, 4),
         "total_chunks": engine.total_processed_chunks,
         "connected_clients": engine.connected_clients,
+        "calibrating": engine.calibration_vols is not None,
     }
 
 
@@ -313,6 +330,40 @@ PANEL_PATH = Path(__file__).resolve().parent / "panel.html"
 @app.get("/panel")
 def panel():
     return FileResponse(PANEL_PATH, media_type="text/html")
+
+
+class CalibrateRequest(BaseModel):
+    seconds: float = 6.0
+    margin_db: float = 6.0
+
+
+@app.post("/noise-gate/calibrate")
+async def calibrate_noise_gate(req: CalibrateRequest):
+    """Measure the room's noise floor from the live mic stream and set the gate just above it.
+
+    The user stays silent while this runs; the gate goes to the loudest steady noise (95th
+    percentile of per-chunk volume) plus margin_db, so fans/hum are muted but speech passes.
+    """
+    if engine.connected_clients == 0:
+        raise HTTPException(status_code=409, detail="No client is streaming; start the Windows client first")
+    if engine.calibration_vols is not None:
+        raise HTTPException(status_code=409, detail="Calibration already running")
+    engine.calibration_vols = []
+    try:
+        await asyncio.sleep(min(max(req.seconds, 2.0), 20.0))
+        vols = engine.calibration_vols
+    finally:
+        engine.calibration_vols = None
+    if len(vols) < 5:
+        raise HTTPException(status_code=409, detail=f"Only {len(vols)} chunks arrived; is the client streaming?")
+    noise = float(np.percentile(vols, 95))
+    if noise < 1e-5:
+        raise HTTPException(status_code=409, detail="Input is digital silence: is the mic muted or the client sending zeros?")
+    noise_db = 20 * float(np.log10(noise))
+    threshold = int(round(min(max(noise_db + req.margin_db, -100), -20)))
+    engine.update_settings(SettingsUpdate(silent_threshold=threshold))
+    logger.info(f"Noise gate calibrated over {len(vols)} chunks: floor {noise_db:.1f} dB -> gate {threshold} dB")
+    return {"noise_floor_db": round(noise_db, 1), "silent_threshold": threshold, "chunks": len(vols)}
 
 
 @app.post("/settings")
@@ -340,7 +391,7 @@ async def voice_websocket(websocket: WebSocket):
             audio_in = np.frombuffer(raw_data, dtype=np.float32)
 
             # Offload heavy synchronous GPU inference to thread pool to not block asyncio event loop
-            audio_out = await loop.run_in_executor(None, engine.process_chunk, audio_in)
+            audio_out = await loop.run_in_executor(model_executor, engine.process_chunk, audio_in)
 
             # Send back converted audio
             await websocket.send_bytes(audio_out.tobytes())

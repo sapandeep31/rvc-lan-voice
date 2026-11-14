@@ -16,7 +16,11 @@
   .stat .v { font-size:18px; font-variant-numeric:tabular-nums; }
   .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; background:var(--muted); }
   .meter { height:8px; background:#2a313b; border-radius:4px; overflow:hidden; margin-top:6px; }
-  .meter > div { height:100%; width:0; background:var(--ok); transition:width .15s; }
+  .meter { position:relative; }
+  .meter > #level { height:100%; width:0; background:var(--ok); transition:width .15s; }
+  .meter > #gate { position:absolute; top:-3px; bottom:-3px; width:2px; background:var(--warn); }
+  button { background:var(--accent); color:#0b0e12; border:0; border-radius:8px; padding:9px 14px; font:inherit; font-weight:600; cursor:pointer; margin-top:10px; }
+  button:disabled { opacity:.5; cursor:default; }
   .row { margin:14px 0 18px; }
   .row label { display:flex; justify-content:space-between; }
   .row .val { font-variant-numeric:tabular-nums; color:var(--accent); }
@@ -34,7 +38,7 @@
     <div class="stat"><div class="k">Pitch detector / device</div><div class="v" id="dev">…</div></div>
     <div class="stat"><div class="k">Processing per chunk</div><div class="v" id="proc">…</div></div>
     <div class="stat"><div class="k">Chunk length</div><div class="v" id="frame">…</div></div>
-    <div class="stat" style="grid-column:1/-1"><div class="k">Mic level reaching the Mac</div><div class="meter"><div id="level"></div></div></div>
+    <div class="stat" style="grid-column:1/-1"><div class="k">Mic level reaching the Mac</div><div class="meter"><div id="level"></div><div id="gate" title="Noise gate"></div></div><div class="k" style="margin-top:4px">Green = mic level, yellow line = noise gate. Below the line is muted.</div></div>
   </section>
 
   <section class="card" aria-label="Voice settings">
@@ -57,6 +61,8 @@
       <label for="silent_threshold">Noise gate <span class="val" id="silent_threshold-v"></span></label>
       <input type="range" id="silent_threshold" min="-100" max="-20" step="1">
       <div class="hint">dB. Raise it (toward −40) if keyboard or fan noise comes through as a voice.</div>
+      <button type="button" id="calibrate">Calibrate to room noise</button>
+      <div class="hint">Stay silent for 6 s with the fan etc. running; the gate is set just above that noise.</div>
     </div>
     <div class="msg" id="msg" role="status"></div>
   </section>
@@ -64,7 +70,8 @@
 <script>
 const fields = { pitch: v => v, formant_shift: v => v.toFixed(1), index_ratio: v => v.toFixed(2), silent_threshold: v => v + " dB" };
 const $ = id => document.getElementById(id);
-let timer = null, pending = {}, loaded = false;
+let timer = null, pending = {};
+const touchedAt = {}, dragging = {};
 
 function show(id, v) { $(id + "-v").textContent = fields[id](Number(v)); }
 
@@ -77,7 +84,10 @@ async function send() {
 }
 
 for (const id of Object.keys(fields)) {
+  $(id).addEventListener("pointerdown", () => dragging[id] = true);
+  $(id).addEventListener("pointerup", () => { dragging[id] = false; touchedAt[id] = Date.now(); });
   $(id).addEventListener("input", e => {
+    touchedAt[id] = Date.now();
     const v = id === "pitch" || id === "silent_threshold" ? parseInt(e.target.value) : parseFloat(e.target.value);
     show(id, v); pending[id] = v;
     clearTimeout(timer); timer = setTimeout(send, 120);
@@ -87,13 +97,15 @@ for (const id of Object.keys(fields)) {
 async function poll() {
   try {
     const h = await (await fetch("/health")).json();
-    if (!loaded) {
-      for (const [id, key] of [["pitch","pitch"],["formant_shift","formant"],["index_ratio","index_ratio"],["silent_threshold","silent_threshold"]]) {
-        $(id).value = h[key]; show(id, h[key]);
-      }
-      loaded = true;
-    }
     const on = h.connected_clients > 0;
+    // Follow the server (another panel may have changed it) unless this slider is being edited here
+    for (const [id, key] of [["pitch","pitch"],["formant_shift","formant"],["index_ratio","index_ratio"],["silent_threshold","silent_threshold"]]) {
+      if (dragging[id] || Date.now() - (touchedAt[id] || 0) < 1500 || id in pending) continue;
+      if (Number($(id).value) !== Number(h[key])) { $(id).value = h[key]; }
+      show(id, h[key]);
+    }
+    $("gate").style.left = Math.max(0, Math.min(100, (h.silent_threshold + 80) / 80 * 100)) + "%";
+    if (!calibrating) $("calibrate").disabled = h.calibrating || !on;
     $("conn").innerHTML = `<span class="dot" style="background:var(${on ? "--ok" : "--muted"})"></span>${on ? "Connected" : "Not connected"}`;
     $("dev").textContent = `${h.f0_detector} / ${h.device}`;
     const frameMs = h.frame_samples ? h.frame_samples / 48 : null;
@@ -106,7 +118,18 @@ async function poll() {
     $("conn").innerHTML = `<span class="dot" style="background:var(--bad)"></span>Server down`;
   }
 }
-poll(); setInterval(poll, 1000);
+let calibrating = false;
+$("calibrate").addEventListener("click", async () => {
+  calibrating = true; $("calibrate").disabled = true;
+  $("msg").textContent = "Listening to the room for 6 s… stay silent";
+  try {
+    const r = await fetch("/noise-gate/calibrate", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const j = await r.json();
+    $("msg").textContent = r.ok ? `Room noise ${j.noise_floor_db} dB → gate set to ${j.silent_threshold} dB` : "Calibration failed: " + j.detail;
+  } catch (e) { $("msg").textContent = "Could not reach server"; }
+  calibrating = false; poll();
+});
+poll(); setInterval(poll, 700);
 </script>
 </body>
 </html>
