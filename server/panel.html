@@ -66,9 +66,24 @@
     </div>
     <div class="msg" id="msg" role="status"></div>
   </section>
+
+  <section class="card" aria-label="Latency and clarity">
+    <div class="row">
+      <label for="chunk_size">Chunk <span class="val" id="chunk_size-v"></span></label>
+      <input type="range" id="chunk_size" min="24" max="64" step="4">
+      <div class="hint">Audio per packet. Smaller = less delay, but "Processing per chunk" must stay well below it (green), or audio stutters.</div>
+    </div>
+    <div class="row">
+      <label for="context_seconds">Context <span class="val" id="context_seconds-v"></span></label>
+      <input type="range" id="context_seconds" min="0.4" max="1.5" step="0.1">
+      <div class="hint">Past audio the model hears. More = clearer Hindi/consonants, more processing, no extra delay. Changing it drops ~0.1 s of audio.</div>
+    </div>
+  </section>
 </main>
 <script>
-const fields = { pitch: v => v, formant_shift: v => v.toFixed(1), index_ratio: v => v.toFixed(2), silent_threshold: v => v + " dB" };
+const fields = { pitch: v => v, formant_shift: v => v.toFixed(1), index_ratio: v => v.toFixed(2), silent_threshold: v => v + " dB",
+  chunk_size: v => `${v} (${(v * 128 / 48).toFixed(0)} ms)`, context_seconds: v => v.toFixed(1) + " s" };
+const intFields = ["pitch", "silent_threshold", "chunk_size"];
 const $ = id => document.getElementById(id);
 let timer = null, pending = {};
 const touchedAt = {}, dragging = {};
@@ -88,7 +103,7 @@ for (const id of Object.keys(fields)) {
   $(id).addEventListener("pointerup", () => { dragging[id] = false; touchedAt[id] = Date.now(); });
   $(id).addEventListener("input", e => {
     touchedAt[id] = Date.now();
-    const v = id === "pitch" || id === "silent_threshold" ? parseInt(e.target.value) : parseFloat(e.target.value);
+    const v = intFields.includes(id) ? parseInt(e.target.value) : parseFloat(e.target.value);
     show(id, v); pending[id] = v;
     clearTimeout(timer); timer = setTimeout(send, 120);
   });
@@ -99,7 +114,7 @@ async function poll() {
     const h = await (await fetch("/health")).json();
     const on = h.connected_clients > 0;
     // Follow the server (another panel may have changed it) unless this slider is being edited here
-    for (const [id, key] of [["pitch","pitch"],["formant_shift","formant"],["index_ratio","index_ratio"],["silent_threshold","silent_threshold"]]) {
+    for (const [id, key] of [["pitch","pitch"],["formant_shift","formant"],["index_ratio","index_ratio"],["silent_threshold","silent_threshold"],["chunk_size","chunk_size"],["context_seconds","context_seconds"]]) {
       if (dragging[id] || Date.now() - (touchedAt[id] || 0) < 1500 || id in pending) continue;
       if (Number($(id).value) !== Number(h[key])) { $(id).value = h[key]; }
       show(id, h[key]);

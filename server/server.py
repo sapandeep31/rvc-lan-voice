@@ -16,7 +16,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Configure logging
 logging.basicConfig(
@@ -106,6 +106,10 @@ class SettingsUpdate(BaseModel):
     formant_shift: Optional[float] = None
     index_ratio: Optional[float] = None
     silent_threshold: Optional[int] = None
+    # Frames the client should send (x 128 samples); the client polls /health and follows it
+    chunk_size: Optional[int] = Field(None, ge=16, le=96)
+    # Seconds of past audio the model sees per chunk; more = clearer articulation, more compute, no delay
+    context_seconds: Optional[float] = Field(None, ge=0.2, le=2.0)
 
 
 class VoiceEngine:
@@ -117,6 +121,8 @@ class VoiceEngine:
         self.current_formant = server_cfg.get("default_formant", 0.7)
         self.current_index_ratio = server_cfg.get("default_index_ratio", 0.4)
         self.current_silent_threshold = server_cfg.get("silent_threshold", -75)
+        self.chunk_size = server_cfg.get("chunk_size", 40)
+        self.context_seconds = server_cfg.get("extra_convert_size", 0.4)
         self.total_processed_chunks = 0
         self.avg_inference_ms = 0.0
         self.last_inference_ms = 0.0
@@ -227,7 +233,7 @@ class VoiceEngine:
             dstId=0,
             f0Detector=f0_det,
             serverReadChunkSize=56,
-            extraConvertSize=server_cfg.get("extra_convert_size", 0.4),
+            extraConvertSize=self.context_seconds,
             crossFadeOverlapSize=server_cfg.get("cross_fade_overlap_size", 0.10),
             silentThreshold=self.current_silent_threshold,
             silenceFront=1,
@@ -318,6 +324,17 @@ class VoiceEngine:
         )
         self.vc._generate_strength()
 
+    def set_context(self, seconds: float):
+        """Change how much past audio the model sees. Runs on the model thread; every stream restarts
+        with fresh buffers sized for the new context (about one chunk of silence)."""
+        self.context_seconds = seconds
+        self.vc.settings.extraConvertSize = seconds
+        self.vc.extra_frame = int(seconds * self.vc.settings.inputSampleRate)
+        self.streams.clear()
+        self.active_stream = None
+        self.vc.block_frame = -1
+        logger.info(f"Conversion context set to {seconds:.2f} s")
+
     def update_settings(self, updates: SettingsUpdate):
         if updates.pitch is not None:
             self.current_pitch = updates.pitch
@@ -333,11 +350,15 @@ class VoiceEngine:
             if self.vc and hasattr(self.vc, "vcmodel"):
                 self.vc.vcmodel.inputSensitivity = 10 ** (updates.silent_threshold / 20)
 
+        if updates.chunk_size is not None:
+            self.chunk_size = updates.chunk_size
+
         if self.vc and hasattr(self.vc, "vcmodel"):
             self.vc.vcmodel.settings.rvcImportedModelInfo = self.model_info
 
         logger.info(
-            f"Updated settings: pitch={self.current_pitch}, formant={self.current_formant}, index={self.current_index_ratio}, threshold={self.current_silent_threshold}"
+            f"Updated settings: pitch={self.current_pitch}, formant={self.current_formant}, index={self.current_index_ratio}, "
+            f"threshold={self.current_silent_threshold}, chunk={self.chunk_size}"
         )
 
 
@@ -374,6 +395,8 @@ def health():
         "pitch": engine.current_pitch,
         "formant": engine.current_formant,
         "index_ratio": engine.current_index_ratio,
+        "chunk_size": engine.chunk_size,
+        "context_seconds": engine.context_seconds,
         "silent_threshold": engine.current_silent_threshold,
         "f0_detector": server_cfg.get("f0_detector", "rmvpe_onnx"),
         "frame_samples": engine.vc.block_frame if engine.vc else None,
@@ -453,9 +476,11 @@ async def calibrate_noise_gate(req: CalibrateRequest):
 
 
 @app.post("/settings")
-def set_settings(updates: SettingsUpdate):
+async def set_settings(updates: SettingsUpdate):
     engine.update_settings(updates)
-    return {"status": "ok", "settings": updates.dict()}
+    if updates.context_seconds is not None and engine.vc is not None:
+        await asyncio.get_running_loop().run_in_executor(model_executor, engine.set_context, updates.context_seconds)
+    return {"status": "ok", "settings": updates.model_dump()}
 
 
 @app.websocket("/ws/voice")

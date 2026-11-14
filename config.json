@@ -10,6 +10,7 @@
     "default_index_ratio": 0.6,
     "f0_detector": "fcpe",
     "force_fp32": false,
+    "chunk_size": 40,
     "extra_convert_size": 1.0,
     "cross_fade_overlap_size": 0.05,
     "silent_threshold": -100
