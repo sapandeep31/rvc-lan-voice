@@ -87,6 +87,12 @@ class VoiceEngine:
         from voiceconversion.voice_changer_settings import VoiceChangerSettings
         from voiceconversion.VoiceChangerV2 import VoiceChangerV2
 
+        # faiss and torch each bundle OpenMP on macOS; multi-threaded faiss search segfaults
+        # in the index lookup. Single-threaded faiss is fine for one small index.
+        import faiss
+
+        faiss.omp_set_num_threads(1)
+
         # Detect best device on this machine (Mac MPS / CUDA / CPU)
         if torch.backends.mps.is_available():
             logger.info("Detected Apple Silicon GPU (Metal Performance Shaders / MPS)!")
@@ -111,7 +117,8 @@ class VoiceEngine:
 
         # Download pretrain weights if missing
         try:
-            downloadWeight(str(pretrain_dir))
+            # downloadWeight is a coroutine; initialize() runs in a worker thread (no running loop)
+            asyncio.run(downloadWeight(str(pretrain_dir)))
         except Exception as e:
             logger.warning(f"Could not download pretrain weights automatically: {e}")
 
@@ -238,9 +245,9 @@ engine = VoiceEngine()
 
 
 @app.on_event("startup")
-def startup_event():
+async def startup_event():
     try:
-        engine.initialize()
+        await asyncio.to_thread(engine.initialize)
     except Exception as e:
         logger.error(f"Failed to initialize voice engine at startup: {e}")
         logger.warning("Will retry when model files are present.")

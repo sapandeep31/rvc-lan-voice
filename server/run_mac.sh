@@ -9,27 +9,24 @@ echo "=================================================="
 echo "    RVC Voice Changer LAN Server (for macOS)     "
 echo "=================================================="
 
-# Check for Python 3
-if ! command -v python3 &> /dev/null; then
-    echo "[!] Error: python3 is not installed. Please install Python 3 (via python.org or 'brew install python@3.11')."
+# voiceconversion 0.0.8 only installs on exactly Python 3.12.3; uv fetches it without touching system Python
+if ! command -v uv &> /dev/null; then
+    echo "[!] Error: uv is required (brew install uv). It provides the exact Python 3.12.3 voiceconversion needs."
     exit 1
 fi
 
-PYTHON_BIN="python3"
-echo "[*] Using Python: $($PYTHON_BIN --version)"
-
-# Create virtual environment if missing
-if [ ! -d ".venv" ]; then
-    echo "[*] Creating Python virtual environment in .venv..."
-    $PYTHON_BIN -m venv .venv
+if [ ! -x ".venv/bin/python" ] || [ "$(.venv/bin/python -c 'import platform;print(platform.python_version())')" != "3.12.3" ]; then
+    echo "[*] Creating Python 3.12.3 virtual environment in .venv..."
+    rm -rf .venv
+    uv venv --python 3.12.3 .venv
 fi
 
 source .venv/bin/activate
 
-# Install / update dependencies
 echo "[*] Checking and installing dependencies..."
-pip install --upgrade pip --quiet
-pip install -r server/requirements_mac.txt --quiet
+uv pip install --quiet -r server/requirements_mac.txt
+# --no-deps: voiceconversion requires onnxruntime-gpu, which has no macOS wheel
+uv pip install --quiet --no-deps "voiceconversion==0.0.8"
 
 # Check hardware acceleration
 echo "[*] Checking hardware acceleration..."
@@ -53,4 +50,6 @@ echo "=================================================="
 echo ""
 
 # Start FastAPI server
+PORT=$(python -c "import json;print(json.load(open('config.json'))['server']['port'])")
+echo "  Port: $PORT (if something else holds it, run: python -m uvicorn --app-dir server server:app --host 0.0.0.0 --port <other>)"
 exec python server/server.py
