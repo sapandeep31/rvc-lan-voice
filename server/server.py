@@ -12,6 +12,7 @@ import torch
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 # Configure logging
@@ -74,6 +75,9 @@ class VoiceEngine:
         self.current_silent_threshold = server_cfg.get("silent_threshold", -75)
         self.total_processed_chunks = 0
         self.avg_inference_ms = 0.0
+        self.last_inference_ms = 0.0
+        self.last_vol = 0.0
+        self.connected_clients = 0
 
     def initialize(self):
         logger.info("Initializing voice conversion engine...")
@@ -169,11 +173,8 @@ class VoiceEngine:
             version="v2",
         )
 
+        # fcpe (PyTorch on MPS) is ~3 ms per chunk vs ~18 ms for rmvpe_onnx, which runs on CPU on macOS
         f0_det = server_cfg.get("f0_detector", "rmvpe_onnx")
-        # On Mac MPS without onnxruntime-gpu, use rmvpe PyTorch or rmvpe_onnx CPU
-        if self.device_name == "mps" and f0_det == "rmvpe_onnx":
-            # Test if rmvpe or rmvpe_onnx is faster
-            f0_det = "rmvpe_onnx"
 
         settings = VoiceChangerSettings(
             inputSampleRate=48000,
@@ -186,7 +187,7 @@ class VoiceEngine:
             crossFadeOverlapSize=server_cfg.get("cross_fade_overlap_size", 0.10),
             silentThreshold=self.current_silent_threshold,
             silenceFront=1,
-            forceFp32=True,
+            forceFp32=server_cfg.get("force_fp32", True),
             disableJit=0,
             rvcImportedModelInfo=self.model_info,
         )
@@ -203,6 +204,8 @@ class VoiceEngine:
         if self.vc is None:
             return audio_chunk
 
+        self._ensure_block_frame(audio_chunk.shape[0])
+
         t0 = time.perf_counter()
         result, vol, perf = self.vc.on_request(audio_chunk)
         elapsed_ms = (time.perf_counter() - t0) * 1000
@@ -210,6 +213,8 @@ class VoiceEngine:
         self.total_processed_chunks += 1
         # Exponential moving average for latency
         self.avg_inference_ms = 0.9 * self.avg_inference_ms + 0.1 * elapsed_ms
+        self.last_inference_ms = elapsed_ms
+        self.last_vol = float(vol)
 
         if self.total_processed_chunks % 100 == 0:
             logger.info(
@@ -217,6 +222,24 @@ class VoiceEngine:
             )
 
         return result
+
+    def _ensure_block_frame(self, block_frame: int):
+        """Resize the model's buffers to the client's frame length (client chunk_size x 128 samples).
+
+        The library sizes its buffers once for a fixed chunk; re-allocating on change lets the
+        client pick its chunk_size without a matching server restart.
+        """
+        if block_frame == self.vc.block_frame:
+            return
+        if block_frame <= 0 or block_frame % 128 != 0:
+            raise ValueError(f"Frame length {block_frame} is not a positive multiple of 128 samples")
+        logger.info(f"Client frame length changed: {self.vc.block_frame} -> {block_frame} samples")
+        self.vc.settings.serverReadChunkSize = block_frame // 128
+        self.vc.block_frame = block_frame
+        self.vc.vcmodel.realloc(
+            block_frame, self.vc.extra_frame, self.vc.crossfade_frame, self.vc.sola_search_frame
+        )
+        self.vc._generate_strength()
 
     def update_settings(self, updates: SettingsUpdate):
         if updates.pitch is not None:
@@ -273,7 +296,23 @@ def health():
         "pitch": engine.current_pitch,
         "formant": engine.current_formant,
         "index_ratio": engine.current_index_ratio,
+        "silent_threshold": engine.current_silent_threshold,
+        "f0_detector": server_cfg.get("f0_detector", "rmvpe_onnx"),
+        "frame_samples": engine.vc.block_frame if engine.vc else None,
+        "avg_inference_ms": round(engine.avg_inference_ms, 1),
+        "last_inference_ms": round(engine.last_inference_ms, 1),
+        "input_volume": round(engine.last_vol, 4),
+        "total_chunks": engine.total_processed_chunks,
+        "connected_clients": engine.connected_clients,
     }
+
+
+PANEL_PATH = Path(__file__).resolve().parent / "panel.html"
+
+
+@app.get("/panel")
+def panel():
+    return FileResponse(PANEL_PATH, media_type="text/html")
 
 
 @app.post("/settings")
@@ -287,6 +326,7 @@ async def voice_websocket(websocket: WebSocket):
     await websocket.accept()
     client_host = websocket.client.host if websocket.client else "unknown"
     logger.info(f"Client connected from {client_host} via WebSocket")
+    engine.connected_clients += 1
 
     loop = asyncio.get_running_loop()
 
@@ -309,6 +349,8 @@ async def voice_websocket(websocket: WebSocket):
         logger.info(f"Client {client_host} disconnected cleanly.")
     except Exception as e:
         logger.error(f"WebSocket error from {client_host}: {e}")
+    finally:
+        engine.connected_clients -= 1
 
 
 def main():

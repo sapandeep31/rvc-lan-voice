@@ -8,9 +8,10 @@
     "default_pitch": 7,
     "default_formant": 0.7,
     "default_index_ratio": 0.4,
-    "f0_detector": "rmvpe_onnx",
+    "f0_detector": "fcpe",
+    "force_fp32": false,
     "extra_convert_size": 0.4,
-    "cross_fade_overlap_size": 0.10,
+    "cross_fade_overlap_size": 0.05,
     "silent_threshold": -75
   },
   "client": {
