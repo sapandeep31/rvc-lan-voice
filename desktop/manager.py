@@ -482,7 +482,11 @@ def show_window(url: str):
     """The app window. Blocks until the user closes it."""
     try:
         import webview
-        webview.create_window(APP_NAME, url, width=660, height=980, min_size=(440, 640), background_color="#111418")
+        height = 980
+        if IS_WINDOWS:
+            import ctypes
+            height = min(height, ctypes.windll.user32.GetSystemMetrics(17) - 10)   # SM_CYFULLSCREEN: fit small screens
+        webview.create_window(APP_NAME, url, width=660, height=height, min_size=(440, 560), background_color="#111418")
         # edgechromium = the WebView2 runtime that ships with Windows 10/11; never the old IE engine
         webview.start(gui="edgechromium" if IS_WINDOWS else None, storage_path=str(HOME / "webview"), private_mode=False)
         return

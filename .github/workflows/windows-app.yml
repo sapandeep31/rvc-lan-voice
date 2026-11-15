@@ -31,6 +31,17 @@ jobs:
         shell: pwsh
         run: |
           # Runners have no sound hardware and the audio service is off
+          # Let desktop apps record sound (off for this account on server images), then start the services
+          foreach ($root in "HKLM:", "HKCU:") {
+            $key = "$root\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
+            foreach ($k in $key, "$key\NonPackaged") {
+              New-Item -Path $k -Force | Out-Null
+              Set-ItemProperty -Path $k -Name Value -Value Allow
+            }
+          }
+          Get-Service camsvc, Audiosrv, AudioEndpointBuilder | Format-Table Name, Status, StartType
+          Set-Service -Name camsvc -StartupType Manual
+          Start-Service camsvc
           Set-Service -Name Audiosrv -StartupType Manual
           Start-Service Audiosrv
           # The app installs VB-Cable itself. On a real PC Windows asks the user to trust the driver;

@@ -92,7 +92,8 @@ def allow_mic():
 
 
 def find_recorder(sd):
-    """Try each Windows sound API's "CABLE Output" until one records; print what each said."""
+    """Try each Windows sound API's "CABLE Output" until one records; print what each said.
+    Returns (device, rate, channels, extra_settings, wasapi_works)."""
     apis = sd.query_hostapis()
     order = ["Windows WASAPI", "MME", "Windows DirectSound", "Windows WDM-KS"]
     candidates = sorted(
@@ -113,10 +114,10 @@ def find_recorder(sd):
             )
             sd.wait()
             print(f'  recorder: {api_name} "{dev["name"]}" works ({rate} Hz, {channels} ch)')
-            return index, rate, channels, extra
+            return index, rate, channels, extra, api_name == "Windows WASAPI"
         except sd.PortAudioError as e:
             print(f'  recorder: {api_name} "{dev["name"]}" ({rate} Hz, {channels} ch) failed: {e}')
-    return None, None, None, None
+    return None, None, None, None, False
 
 
 def wait_api(seconds=60):
@@ -223,12 +224,12 @@ def audio_phase(engine, audio_devices, wav):
         # Record what a game would hear: the cable's other end
         api = next(i for i, a in enumerate(sd.query_hostapis()) if a["name"] == "Windows WASAPI")
         print("microphone privacy:", mic_privacy())
-        rec_dev, rate, rec_channels, extra = find_recorder(sd)
+        rec_dev, rate, rec_channels, extra, wasapi_ok = find_recorder(sd)
         if rec_dev is None:
             print("no host API could record; allowing microphone access for desktop apps and retrying")
             allow_mic()
             print("microphone privacy:", mic_privacy())
-            rec_dev, rate, rec_channels, extra = find_recorder(sd)
+            rec_dev, rate, rec_channels, extra, wasapi_ok = find_recorder(sd)
         check("the test can record CABLE Output", rec_dev is not None)
 
         def record(seconds):
@@ -261,6 +262,13 @@ def audio_phase(engine, audio_devices, wav):
         # Self check through a real Windows microphone device. The machine's only devices are the
         # cable's two ends, so: play the WAV into the cable, let the engine record the cable's other
         # end as its microphone, and listen for its converted playback coming back through the cable.
+        if not wasapi_ok:
+            # Hosted test machines can refuse sound capture to everything but kernel streaming
+            print(
+                "NOTE  this machine cannot record through WASAPI, so the self check through a real "
+                "microphone device was NOT run"
+            )
+            return
         mic_name = next(d["name"] for d in audio_devices["inputs"] if "CABLE Output" in d["name"])
         status, body = post(engine + "/audio/settings", {"input": mic_name, "monitor": audio_devices["cable"]})
         check("choose devices", status == 200, str(body)[:200])
