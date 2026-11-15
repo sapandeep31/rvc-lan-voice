@@ -478,14 +478,29 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"status": "ok"})
 
 
+def work_area_height() -> int:
+    """Height of the primary screen without the taskbar, in the 100%-scaling pixels window sizes use
+    (a 1080p laptop at 125% scaling has 864 of them, not 1080)."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    user32.GetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+    user32.GetAwarenessFromDpiAwarenessContext.argtypes = (ctypes.c_void_p,)
+    rect = wintypes.RECT()
+    user32.SystemParametersInfoW(0x30, 0, ctypes.byref(rect), 0)   # SPI_GETWORKAREA
+    height = rect.bottom - rect.top
+    # A DPI-aware process is told physical pixels; an unaware one already gets scaled ones
+    if user32.GetAwarenessFromDpiAwarenessContext(user32.GetThreadDpiAwarenessContext()) != 0:
+        height = int(height / (ctypes.windll.shcore.GetScaleFactorForDevice(0) / 100))
+    log.info(f"Screen work area: {height} px high")
+    return height
+
+
 def show_window(url: str):
     """The app window. Blocks until the user closes it."""
+    height = min(980, work_area_height() - 60) if IS_WINDOWS else 980   # centred, clear of the taskbar
     try:
         import webview
-        height = 980
-        if IS_WINDOWS:
-            import ctypes
-            height = min(height, ctypes.windll.user32.GetSystemMetrics(17) - 10)   # SM_CYFULLSCREEN: fit small screens
         webview.create_window(APP_NAME, url, width=660, height=height, min_size=(440, 560), background_color="#111418")
         # edgechromium = the WebView2 runtime that ships with Windows 10/11; never the old IE engine
         webview.start(gui="edgechromium" if IS_WINDOWS else None, storage_path=str(HOME / "webview"), private_mode=False)
