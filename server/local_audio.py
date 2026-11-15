@@ -334,7 +334,14 @@ class LocalAudio:
         if name and name.startswith(TEST_INPUT_PREFIX) and os.environ.get("RVC_AUDIO_TEST") == "1":
             self.source = WavInput(name[len(TEST_INPUT_PREFIX):], self._on_audio)
         else:
-            self.source = MicInput(self._device("input", "input", "microphone"), self._on_audio, self._on_mic_stopped)
+            device = self._device("input", "input", "microphone")
+            try:
+                self.source = MicInput(device, self._on_audio, self._on_mic_stopped)
+            except sd.PortAudioError as e:
+                raise AudioError(
+                    f"The microphone \"{device['name']}\" could not be opened. In Windows Settings, under Privacy & "
+                    "security, Microphone, switch on \"Let desktop apps access your microphone\", and close any app "
+                    f"that has taken the microphone for itself. ({e})") from e
         self.stopping = False
         self.worker = threading.Thread(target=self._run, name="local-audio", daemon=True)
         self.worker.start()

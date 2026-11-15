@@ -64,6 +64,61 @@ def make_voice_like_wav(path: Path, seconds=6.0):
         w.writeframes(b"".join(frames))
 
 
+MIC_CONSENT = r"SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
+
+
+def mic_privacy():
+    """Windows' "let apps use the microphone" switches, as stored in the registry."""
+    import winreg
+
+    found = {}
+    for root, root_name in ((winreg.HKEY_LOCAL_MACHINE, "HKLM"), (winreg.HKEY_CURRENT_USER, "HKCU")):
+        for sub in ("", "\\NonPackaged"):
+            try:
+                with winreg.OpenKey(root, MIC_CONSENT + sub) as key:
+                    found[root_name + sub] = winreg.QueryValueEx(key, "Value")[0]
+            except OSError:
+                found[root_name + sub] = None
+    return found
+
+
+def allow_mic():
+    import winreg
+
+    for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        for sub in ("", "\\NonPackaged"):
+            with winreg.CreateKeyEx(root, MIC_CONSENT + sub, 0, winreg.KEY_SET_VALUE) as key:
+                winreg.SetValueEx(key, "Value", 0, winreg.REG_SZ, "Allow")
+
+
+def find_recorder(sd):
+    """Try each Windows sound API's "CABLE Output" until one records; print what each said."""
+    apis = sd.query_hostapis()
+    order = ["Windows WASAPI", "MME", "Windows DirectSound", "Windows WDM-KS"]
+    candidates = sorted(
+        (
+            (order.index(apis[d["hostapi"]]["name"]) if apis[d["hostapi"]]["name"] in order else 9, i, d)
+            for i, d in enumerate(sd.query_devices())
+            if d["max_input_channels"] > 0 and "cable output" in d["name"].lower()
+        ),
+        key=lambda c: c[0],
+    )
+    for _rank, index, dev in candidates:
+        api_name = apis[dev["hostapi"]]["name"]
+        rate, channels = int(dev["default_samplerate"]), min(2, dev["max_input_channels"])
+        extra = sd.WasapiSettings(auto_convert=True) if api_name == "Windows WASAPI" else None
+        try:
+            sd.rec(
+                int(0.3 * rate), samplerate=rate, channels=channels, device=index, dtype="float32", extra_settings=extra
+            )
+            sd.wait()
+            print(f'  recorder: {api_name} "{dev["name"]}" works ({rate} Hz, {channels} ch)')
+            return index, rate, channels, extra
+        except sd.PortAudioError as e:
+            print(f'  recorder: {api_name} "{dev["name"]}" ({rate} Hz, {channels} ch) failed: {e}')
+    return None, None, None, None
+
+
 def wait_api(seconds=60):
     for _ in range(seconds):
         try:
@@ -167,13 +222,14 @@ def audio_phase(engine, audio_devices, wav):
         time.sleep(6)  # first frames: buffers allocate, the model warms up
         # Record what a game would hear: the cable's other end
         api = next(i for i, a in enumerate(sd.query_hostapis()) if a["name"] == "Windows WASAPI")
-        rec_dev = next(
-            i
-            for i, d in enumerate(sd.query_devices())
-            if d["hostapi"] == api and d["max_input_channels"] > 0 and "CABLE Output" in d["name"]
-        )
-        rate = int(sd.query_devices(rec_dev)["default_samplerate"])
-        rec_channels = min(2, sd.query_devices(rec_dev)["max_input_channels"])
+        print("microphone privacy:", mic_privacy())
+        rec_dev, rate, rec_channels, extra = find_recorder(sd)
+        if rec_dev is None:
+            print("no host API could record; allowing microphone access for desktop apps and retrying")
+            allow_mic()
+            print("microphone privacy:", mic_privacy())
+            rec_dev, rate, rec_channels, extra = find_recorder(sd)
+        check("the test can record CABLE Output", rec_dev is not None)
 
         def record(seconds):
             data = sd.rec(
@@ -182,7 +238,7 @@ def audio_phase(engine, audio_devices, wav):
                 channels=rec_channels,
                 device=rec_dev,
                 dtype="float32",
-                extra_settings=sd.WasapiSettings(auto_convert=True),
+                extra_settings=extra,
             )
             sd.wait()
             return data.mean(axis=1)
