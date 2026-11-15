@@ -1,0 +1,67 @@
+name: Windows app
+
+# Builds dist\RVCVoice.exe and tests it end to end on a Windows machine: full install, VB-Cable,
+# voice conversion into the cable, and the app window. The tested .exe is kept as an artifact.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "desktop/**"
+      - "server/**"
+      - "setup/download_models.py"
+      - "config.json"
+      - ".github/workflows/windows-app.yml"
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build RVCVoice.exe
+        run: powershell -ExecutionPolicy Bypass -File desktop\build.ps1
+
+      - name: Prepare the test machine's audio
+        shell: pwsh
+        run: |
+          # Runners have no sound hardware and the audio service is off
+          Set-Service -Name Audiosrv -StartupType Manual
+          Start-Service Audiosrv
+          # The app installs VB-Cable itself. On a real PC Windows asks the user to trust the driver;
+          # nobody can click here, so trust VB-Audio's certificate up front (test machine only).
+          Invoke-WebRequest https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack46.zip -OutFile vb.zip
+          Expand-Archive vb.zip -DestinationPath vb
+          (Get-AuthenticodeSignature vb\vbaudio_cable64_win10.cat).SignerCertificate | Export-Certificate -Type CERT -FilePath vb\vb.cer
+          Import-Certificate -FilePath vb\vb.cer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher
+
+      - name: End-to-end test
+        run: |
+          python -m pip install --quiet sounddevice numpy pillow
+          python desktop\tests\e2e_windows.py
+
+      - name: PyTorch builds for NVIDIA cards resolve
+        if: always()
+        shell: pwsh
+        run: |
+          # The test machine has no NVIDIA card, so the app installed the CPU build. Check that the two
+          # GPU builds the app can pick still resolve together with the engine's packages.
+          $uv = "$env:LOCALAPPDATA\RVCVoice\bin\uv.exe"
+          $py = "$env:LOCALAPPDATA\RVCVoice\venv\Scripts\python.exe"
+          foreach ($backend in "cu126", "cu128") {
+            & $uv pip install --dry-run --python $py --torch-backend $backend "voiceconversion==0.0.8" fastapi "uvicorn[standard]" websockets "numpy<2" pydantic 2>&1 | Select-String -Pattern "torch|error|Would" | Select-Object -First 12
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: RVCVoice
+          path: |
+            dist/RVCVoice.exe
+            e2e-out/

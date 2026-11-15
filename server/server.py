@@ -4,8 +4,11 @@ import logging
 import os
 import faulthandler
 import itertools
+import subprocess
 import sys
+import threading
 import time
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
@@ -17,6 +20,8 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+
+from local_audio import LocalAudio, create_router
 
 # Configure logging
 logging.basicConfig(
@@ -41,8 +46,9 @@ def _init_model_thread():
 # and it keeps faiss single-threaded no matter how many clients connect.
 model_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rvc-model", initializer=_init_model_thread)
 
-# Load configuration
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
+# Load configuration. The desktop app keeps its own config.json (and the settings files saved next to it)
+# in its data folder and points RVC_CONFIG at it; otherwise it is the repo's config.json.
+CONFIG_PATH = Path(os.environ.get("RVC_CONFIG") or Path(__file__).resolve().parent.parent / "config.json")
 if CONFIG_PATH.exists():
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = json.load(f)
@@ -134,6 +140,8 @@ class VoiceEngine:
         self.vc = None
         self.device_name = "cpu"
         self.model_info = None
+        self.init_error: Optional[str] = None
+        self.models_dir = CONFIG_PATH.parent / server_cfg.get("model_dir", "models")
         self.current_pitch = server_cfg.get("default_pitch", 7)
         self.current_formant = server_cfg.get("default_formant", 0.7)
         self.current_index_ratio = server_cfg.get("default_index_ratio", 0.4)
@@ -167,11 +175,12 @@ class VoiceEngine:
             logger.info("Running on CPU with multi-threaded optimization.")
             self.device_name = "cpu"
 
-        # Determine model path
-        models_dir = Path(__file__).resolve().parent.parent / "models"
-        models_dir.mkdir(parents=True, exist_ok=True)
+        # Voice and base-model folders come from config, relative to the config file unless absolute
+        self.models_dir.mkdir(parents=True, exist_ok=True)
 
-        pretrain_dir = Path(__file__).resolve().parent.parent / "pretrain"
+        pretrain_dir = CONFIG_PATH.parent / server_cfg.get("pretrain_dir", "pretrain")
+        if Path(server_cfg.get("pretrain_dir", "pretrain")).is_absolute():
+            pretrain_dir.mkdir(parents=True, exist_ok=True)
         if not pretrain_dir.exists():
             pretrain_dir = Path(os.path.expanduser("~/AppData/Local/pretrain"))
             if not pretrain_dir.exists():
@@ -185,7 +194,6 @@ class VoiceEngine:
         except Exception as e:
             logger.warning(f"Could not download pretrain weights automatically: {e}")
 
-        self.models_dir = models_dir
         self.pretrain_dir = pretrain_dir
         # The panel's last pick wins over config "default_model"
         self.load_voice(load_voice_settings().get(LAST_VOICE_KEY) or server_cfg.get("default_model", "kafka"))
@@ -446,14 +454,38 @@ class VoiceEngine:
 
 engine = VoiceEngine()
 
+# Local microphone/cable audio for the one-PC desktop app (the LAN setup uses /ws/voice instead)
+local_audio = LocalAudio(engine, model_executor, CONFIG_PATH.parent / "audio_settings.json")
+app.include_router(create_router(local_audio))
+
+
+def streaming_sources() -> int:
+    return engine.connected_clients + (1 if local_audio.streaming else 0)
+
+
+def _exit_when_parent_closes():
+    """The desktop app holds our stdin; when it exits (or crashes) the pipe closes and we stop too,
+    so the mic and GPU are never left held by an orphaned engine."""
+    sys.stdin.buffer.read()
+    logger.info("Parent app closed; shutting down")
+    os._exit(0)
+
 
 @app.on_event("startup")
 async def startup_event():
+    if os.environ.get("RVC_EXIT_WITH_PARENT") == "1":
+        threading.Thread(target=_exit_when_parent_closes, name="parent-watch", daemon=True).start()
     try:
         await asyncio.get_running_loop().run_in_executor(model_executor, engine.initialize)
     except Exception as e:
+        engine.init_error = str(e)
         logger.error(f"Failed to initialize voice engine at startup: {e}")
         logger.warning("Will retry when model files are present.")
+
+
+@app.on_event("shutdown")
+def shutdown_event():
+    local_audio.shutdown()
 
 
 @app.get("/")
@@ -472,6 +504,7 @@ def index():
 def health():
     return {
         "status": "healthy",
+        "init_error": engine.init_error,
         "device": engine.device_name,
         "model": engine.model_info.name if engine.model_info else None,
         "pitch": engine.current_pitch,
@@ -486,7 +519,7 @@ def health():
         "last_inference_ms": round(engine.last_inference_ms, 1),
         "input_volume": round(engine.last_vol, 4),
         "total_chunks": engine.total_processed_chunks,
-        "connected_clients": engine.connected_clients,
+        "connected_clients": streaming_sources(),
         "calibrating": engine.calibration_vols is not None,
     }
 
@@ -494,11 +527,46 @@ def health():
 _stream_ids = itertools.count(1)
 
 PANEL_PATH = Path(__file__).resolve().parent / "panel.html"
+APP_PATH = Path(__file__).resolve().parent / "app.html"
+LINKEDIN_URL = "https://in.linkedin.com/in/sapandeep-singh"
 
 
 @app.get("/panel")
 def panel():
     return FileResponse(PANEL_PATH, media_type="text/html")
+
+
+@app.get("/app")
+def desktop_app():
+    """The desktop app's main page: on/off switch, the panel, self check and device choice."""
+    return FileResponse(APP_PATH, media_type="text/html")
+
+
+@app.post("/open/linkedin")
+def open_linkedin():
+    """Open the author's LinkedIn in the PC's default browser (the app window itself never leaves the app)."""
+    webbrowser.open(LINKEDIN_URL)
+    return {"status": "ok"}
+
+
+@app.post("/open/sound-settings")
+def open_sound_settings():
+    """Windows' Sound settings, where the user picks their headphones as the output again."""
+    if sys.platform != "win32":
+        raise HTTPException(status_code=404, detail="Windows only")
+    os.startfile("ms-settings:sound")
+    return {"status": "ok"}
+
+
+@app.post("/open/voices-folder")
+def open_voices_folder():
+    """Show the folder where voices live, to add one: models/<Name>/ with a .safetensors and an .index."""
+    folder = engine.models_dir
+    if sys.platform == "win32":
+        os.startfile(folder)
+    else:
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(folder)])
+    return {"status": "ok", "folder": str(folder)}
 
 
 # Gate used when the mic already removes room noise upstream: well below quiet speech (about -40 dBFS)
@@ -518,8 +586,8 @@ async def calibrate_noise_gate(req: CalibrateRequest):
     percentile of per-chunk volume) plus margin_db, so fans/hum are muted but speech passes.
     If the mic already zeroes its noise floor upstream, the gate is at least UPSTREAM_SUPPRESSED_GATE_DB.
     """
-    if engine.connected_clients == 0:
-        raise HTTPException(status_code=409, detail="No client is streaming; start the Windows client first")
+    if streaming_sources() == 0:
+        raise HTTPException(status_code=409, detail="No microphone audio is arriving; switch the voice changer on (or start the client) first")
     if engine.calibration_vols is not None:
         raise HTTPException(status_code=409, detail="Calibration already running")
     engine.calibration_vols = []

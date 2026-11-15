@@ -1,0 +1,4 @@
+# Build-time packages for the desktop app's .exe (the voice engine's own packages are installed by the app at first run)
+pyinstaller>=6.6
+pywebview>=5.1
+sounddevice<0.5.0

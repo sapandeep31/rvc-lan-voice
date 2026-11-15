@@ -44,3 +44,9 @@ models/*
 
 # Per-voice tuned settings, saved by the server on this machine
 voice_settings.json
+
+# Local microphone/cable choices, saved by the server on this machine
+audio_settings.json
+
+# PyInstaller
+*.spec

@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>RVC Voice</title>
+<style>
+  :root { --bg:#111418; --card:#1b2027; --line:#2a313b; --text:#e8ecf1; --muted:#8b95a3; --accent:#7c9cff; --ok:#3ecf8e; --warn:#f5b84b; --bad:#ef5b5b; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.45 "Segoe UI",-apple-system,system-ui,sans-serif; }
+  main { max-width:600px; margin:0 auto; padding:16px 16px 8px; }
+  header { display:flex; align-items:center; justify-content:space-between; margin:2px 0 14px; }
+  h1 { font-size:20px; margin:0; }
+  h2 { font-size:16px; margin:0 0 6px; }
+  .pill { font-size:12px; color:var(--muted); background:var(--card); border-radius:999px; padding:4px 10px; }
+  .card { background:var(--card); border-radius:12px; padding:16px; margin-bottom:12px; }
+  .power { display:flex; align-items:center; gap:16px; }
+  #power { flex:none; width:76px; height:76px; border-radius:50%; border:3px solid var(--line); background:#232a33; color:var(--muted); cursor:pointer; display:grid; place-items:center; transition:all .15s; }
+  #power svg { width:34px; height:34px; }
+  #power.on { border-color:var(--ok); color:#0b0e12; background:var(--ok); box-shadow:0 0 22px rgba(62,207,142,.35); }
+  #power:disabled { opacity:.5; cursor:default; }
+  #power:focus-visible, button:focus-visible, select:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  #power-title { font-size:18px; font-weight:600; }
+  .muted, .hint { color:var(--muted); font-size:13px; }
+  #error { display:none; background:#3a2023; border:1px solid #6b2f35; color:#ffc9cd; border-radius:10px; padding:10px 12px; margin-bottom:12px; font-size:14px; }
+  #speaker-warn { background:#3a3220; border:1px solid #6b5a2f; color:#ffe9b8; border-radius:10px; padding:10px 12px; margin-bottom:12px; font-size:14px; }
+  [hidden] { display:none !important; }
+  nav { display:flex; gap:4px; background:var(--card); border-radius:10px; padding:4px; margin-bottom:12px; }
+  nav button { flex:1; background:transparent; color:var(--muted); border:0; border-radius:7px; padding:8px 4px; font:inherit; cursor:pointer; }
+  nav button[aria-selected=true] { background:var(--line); color:var(--text); font-weight:600; }
+  section[role=tabpanel] { display:none; }
+  section[role=tabpanel].shown { display:block; }
+  iframe { width:100%; border:0; display:block; min-height:600px; }
+  .btn { background:var(--accent); color:#0b0e12; border:0; border-radius:8px; padding:9px 14px; font:inherit; font-weight:600; cursor:pointer; }
+  .btn { white-space:nowrap; }
+  .btn.ghost { background:var(--line); color:var(--text); }
+  .btn:disabled { opacity:.5; cursor:default; }
+  .row { margin:14px 0 4px; }
+  .row label { display:flex; justify-content:space-between; }
+  .row .val { color:var(--accent); font-variant-numeric:tabular-nums; }
+  select { width:100%; margin-top:6px; padding:9px 10px; background:var(--line); color:var(--text); border:0; border-radius:8px; font:inherit; }
+  input[type=range] { width:100%; margin-top:8px; accent-color:var(--accent); }
+  .meter { height:8px; background:var(--line); border-radius:4px; overflow:hidden; margin:6px 0 12px; }
+  .meter > div { height:100%; width:0; background:var(--ok); transition:width .15s; }
+  .switch { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  ol, ul { margin:6px 0 0; padding-left:20px; }
+  li { margin:4px 0; }
+  footer { text-align:center; color:var(--muted); font-size:13px; padding:6px 0 18px; }
+  footer button { background:none; border:0; color:var(--accent); font:inherit; font-weight:600; cursor:pointer; padding:0; text-decoration:underline; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>RVC Voice</h1>
+    <span class="pill" id="engine" data-testid="engine-state">Starting…</span>
+  </header>
+
+  <div id="error" role="alert" data-testid="error-audio"></div>
+
+  <div id="speaker-warn" data-testid="warn-default-speaker" hidden>
+    Windows is sending all your PC's sound into the virtual cable, so you hear nothing. In Sound settings, choose your headphones or speakers as the output.
+    <div class="row"><button type="button" class="btn ghost" id="sound-settings">Open Sound settings</button></div>
+  </div>
+
+  <div class="card power">
+    <button type="button" id="power" aria-pressed="false" aria-label="Voice changer on or off" data-testid="power-toggle" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 3v9"/><path d="M6.3 6.8a8 8 0 1 0 11.4 0"/></svg>
+    </button>
+    <div>
+      <div id="power-title">Voice changer is off</div>
+      <div class="muted" id="power-sub">Switch on to send your new voice to games and Discord.</div>
+    </div>
+  </div>
+
+  <nav role="tablist" aria-label="Sections">
+    <button type="button" role="tab" data-tab="voice" aria-selected="true">Voice</button>
+    <button type="button" role="tab" data-tab="check" aria-selected="false">Self check</button>
+    <button type="button" role="tab" data-tab="devices" aria-selected="false">Devices</button>
+    <button type="button" role="tab" data-tab="help" aria-selected="false">Help</button>
+  </nav>
+
+  <section role="tabpanel" id="tab-voice" class="shown">
+    <iframe id="panel" src="/panel?embed" title="Voice settings"></iframe>
+  </section>
+
+  <section role="tabpanel" id="tab-check">
+    <div class="card">
+      <h2>Record and listen</h2>
+      <div class="hint">Records you for 5 seconds, then plays it back in the new voice on your headphones or speakers.</div>
+      <div class="row"><button type="button" class="btn" id="test" data-testid="submit-self-check">Record 5 seconds</button></div>
+      <div class="hint" id="test-msg" role="status"></div>
+    </div>
+    <div class="card">
+      <div class="switch">
+        <div>
+          <h2>Hear yourself live</h2>
+          <div class="hint">Plays the new voice on your headphones while you talk. It arrives a moment late; that is normal. Use headphones, not speakers, or it will echo.</div>
+        </div>
+        <button type="button" class="btn ghost" id="monitor" aria-pressed="false" data-testid="monitor-toggle">Turn on</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="hint">Microphone level</div>
+      <div class="meter"><div id="in-level"></div></div>
+      <div class="hint">New voice going to the virtual cable</div>
+      <div class="meter" style="margin-bottom:0"><div id="out-level"></div></div>
+    </div>
+  </section>
+
+  <section role="tabpanel" id="tab-devices">
+    <form class="card" id="devices-form" data-testid="form-devices">
+      <div class="row" style="margin-top:0">
+        <label for="input">Microphone</label>
+        <select id="input"></select>
+      </div>
+      <div class="row">
+        <label for="monitor-dev">Headphones or speakers</label>
+        <select id="monitor-dev"></select>
+        <div class="hint">Used only for the self check.</div>
+      </div>
+      <div class="row">
+        <label for="output">Virtual cable</label>
+        <select id="output"></select>
+        <div class="hint">Where the new voice is sent. Leave it on "CABLE Input".</div>
+      </div>
+      <div class="row">
+        <label for="gain">Output volume <span class="val" id="gain-v"></span></label>
+        <input type="range" id="gain" min="0.5" max="2.5" step="0.1">
+        <div class="hint">Raise it if friends say you are too quiet.</div>
+      </div>
+      <div class="row"><button type="button" class="btn ghost" id="rescan">Look for new devices</button></div>
+    </form>
+    <div class="card">
+      <h2>Add a voice</h2>
+      <div class="hint">Put a folder with one <b>.safetensors</b> (or .pth) file and its <b>.index</b> file into the voices folder, restart the app, and pick it under Voice. Only use voices you have the rights to.</div>
+      <div class="row"><button type="button" class="btn ghost" id="voices-folder">Open the voices folder</button></div>
+    </div>
+  </section>
+
+  <section role="tabpanel" id="tab-help">
+    <div class="card">
+      <h2>Use it in Discord or a game</h2>
+      <ol>
+        <li>Switch the voice changer on with the round button.</li>
+        <li>In Discord (Settings, Voice &amp; Video) or your game, choose <b>CABLE Output (VB-Audio Virtual Cable)</b> as the microphone.</li>
+        <li>In Discord, turn off its noise suppression and echo cancellation so it does not alter the new voice.</li>
+      </ol>
+    </div>
+    <div class="card">
+      <h2>If something is off</h2>
+      <ul>
+        <li><b>Friends hear nothing:</b> check the button is green and the app or game uses CABLE Output as its microphone.</li>
+        <li><b>Voice stutters:</b> on the Voice tab raise Chunk, or lower Context, until "Processing per chunk" is green.</li>
+        <li><b>Fan or keyboard is heard:</b> on the Voice tab press "Calibrate to room noise" and stay quiet.</li>
+        <li><b>Your PC's sound went silent after setup:</b> Windows made the virtual cable the default speaker. In Windows Sound settings choose your headphones as the output again.</li>
+      </ul>
+    </div>
+  </section>
+
+  <footer>Made by Sapandeep Singh · <button type="button" id="linkedin" data-testid="link-linkedin">Follow me on LinkedIn</button></footer>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const post = (url, body) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+let status = null, busy = false, gainTouched = 0;
+
+function showError(text) { $("error").textContent = text || ""; $("error").style.display = text ? "block" : "none"; }
+
+async function act(url, body) {
+  busy = true;
+  try {
+    const r = await post(url, body);
+    const j = await r.json();
+    if (r.ok) { render(j); showError(j.error); } else showError(j.detail || "Something went wrong.");
+  } catch (e) { showError("The voice engine is not answering."); }
+  busy = false;
+}
+
+function level(v) { return Math.max(0, Math.min(100, (20 * Math.log10(Math.max(v, 1e-5)) + 70) / 70 * 100)) + "%"; }
+
+function render(s) {
+  status = s;
+  $("engine").textContent = s.engine_ready ? "Ready" : "Loading voice…";
+  $("power").disabled = !s.engine_ready && !s.on;
+  $("power").classList.toggle("on", s.on);
+  $("power").setAttribute("aria-pressed", s.on);
+  $("power-title").textContent = s.on ? "Voice changer is on" : "Voice changer is off";
+  $("power-sub").innerHTML = s.on
+    ? "Your new voice is going to <b>CABLE Output</b>. Choose it as the microphone in Discord or your game."
+    : "Switch on to send your new voice to games and Discord.";
+  $("speaker-warn").hidden = !s.cable_is_default_speaker;
+  $("monitor").textContent = s.monitor_on ? "Turn off" : "Turn on";
+  $("monitor").setAttribute("aria-pressed", s.monitor_on);
+  $("monitor").disabled = s.test !== "idle" || !s.engine_ready;
+  $("test").disabled = s.test !== "idle" || !s.engine_ready;
+  $("test-msg").textContent = s.test === "recording" ? `Recording… speak now (${s.test_seconds_left.toFixed(0)} s left)`
+    : s.test === "playing" ? "Playing it back in the new voice…" : "";
+  $("in-level").style.width = level(s.input_level);
+  $("out-level").style.width = level(s.output_level);
+  if (Date.now() - gainTouched > 1500) { $("gain").value = s.gain; $("gain-v").textContent = Number(s.gain).toFixed(1) + "×"; }
+  for (const [id, key] of [["input", "input"], ["monitor-dev", "monitor"], ["output", "output"]])
+    if (document.activeElement !== $(id) && $(id).value !== (s.devices[key] || "")) $(id).value = s.devices[key] || "";
+}
+
+async function poll() {
+  if (busy) return;
+  try {
+    const s = await (await fetch("/audio/status")).json();
+    render(s);
+    if (s.error) showError(s.error);
+  } catch (e) { $("engine").textContent = "Not answering"; }
+}
+
+async function loadDevices() {
+  const d = await (await fetch("/audio/devices")).json();
+  const fill = (id, list) => $(id).replaceChildren(...list.map(x => new Option(x.name, x.name)));
+  fill("input", d.inputs); fill("monitor-dev", d.outputs.filter(x => x.name !== d.cable)); fill("output", d.outputs);
+  if (!d.cable) $("output").prepend(new Option("VB-Cable is not installed", "", true, true));
+  if (status) render(status);
+}
+
+$("power").addEventListener("click", () => act("/audio/power", { on: !(status && status.on) }));
+$("monitor").addEventListener("click", () => act("/audio/monitor", { on: !(status && status.monitor_on) }));
+$("test").addEventListener("click", () => act("/audio/test", { seconds: 5 }));
+$("input").addEventListener("change", e => act("/audio/settings", { input: e.target.value }));
+$("monitor-dev").addEventListener("change", e => act("/audio/settings", { monitor: e.target.value }));
+$("output").addEventListener("change", e => { if (e.target.value) act("/audio/settings", { output: e.target.value }); });
+$("gain").addEventListener("input", e => { gainTouched = Date.now(); $("gain-v").textContent = Number(e.target.value).toFixed(1) + "×"; });
+$("gain").addEventListener("change", e => act("/audio/settings", { gain: parseFloat(e.target.value) }));
+$("rescan").addEventListener("click", loadDevices);
+$("sound-settings").addEventListener("click", () => post("/open/sound-settings"));
+$("voices-folder").addEventListener("click", () => post("/open/voices-folder"));
+$("linkedin").addEventListener("click", () => post("/open/linkedin"));
+$("devices-form").addEventListener("submit", e => e.preventDefault());
+
+for (const tab of document.querySelectorAll("nav button")) tab.addEventListener("click", () => {
+  for (const t of document.querySelectorAll("nav button")) t.setAttribute("aria-selected", t === tab);
+  for (const p of document.querySelectorAll("section[role=tabpanel]")) p.classList.toggle("shown", p.id === "tab-" + tab.dataset.tab);
+  if (tab.dataset.tab === "devices") loadDevices();
+});
+
+// The panel is its own page; keep the frame as tall as its content so only this page scrolls
+setInterval(() => { try { $("panel").style.height = $("panel").contentDocument.documentElement.scrollHeight + "px"; } catch (e) {} }, 500);
+
+loadDevices().catch(() => {}); poll(); setInterval(poll, 700);
+</script>
+</body>
+</html>

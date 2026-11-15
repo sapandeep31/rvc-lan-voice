@@ -28,6 +28,8 @@
   input[type=range] { width:100%; margin-top:8px; accent-color:var(--accent); }
   select { width:100%; margin-top:8px; padding:9px 10px; background:#2a313b; color:var(--text); border:0; border-radius:8px; font:inherit; }
   .msg { color:var(--muted); font-size:12px; min-height:16px; }
+  .embed h1 { display:none; }   /* inside the desktop app, which has its own header */
+  .embed main { padding:0; }
 </style>
 </head>
 <body>
@@ -35,11 +37,11 @@
   <h1>Voice Panel</h1>
 
   <section class="card status" aria-label="Live status">
-    <div class="stat"><div class="k">Windows client</div><div class="v" id="conn"><span class="dot"></span>…</div></div>
+    <div class="stat"><div class="k">Mic stream</div><div class="v" id="conn"><span class="dot"></span>…</div></div>
     <div class="stat"><div class="k">Voice model / device</div><div class="v" id="dev">…</div></div>
     <div class="stat"><div class="k">Processing per chunk</div><div class="v" id="proc">…</div></div>
     <div class="stat"><div class="k">Chunk length</div><div class="v" id="frame">…</div></div>
-    <div class="stat" style="grid-column:1/-1"><div class="k">Mic level reaching the Mac</div><div class="meter"><div id="level"></div><div id="gate" title="Noise gate"></div></div><div class="k" style="margin-top:4px">Green = mic level, yellow line = noise gate. Below the line is muted.</div></div>
+    <div class="stat" style="grid-column:1/-1"><div class="k">Mic level reaching the voice model</div><div class="meter"><div id="level"></div><div id="gate" title="Noise gate"></div></div><div class="k" style="margin-top:4px">Green = mic level, yellow line = noise gate. Below the line is muted.</div></div>
   </section>
 
   <section class="card" aria-label="Voice settings">
@@ -91,6 +93,7 @@ const fields = { pitch: v => v, formant_shift: v => v.toFixed(1), index_ratio: v
   chunk_size: v => `${v} (${(v * 128 / 48).toFixed(0)} ms)`, context_seconds: v => v.toFixed(1) + " s" };
 const intFields = ["pitch", "silent_threshold", "chunk_size"];
 const $ = id => document.getElementById(id);
+if (new URLSearchParams(location.search).has("embed")) document.body.classList.add("embed");
 let timer = null, pending = {};
 const touchedAt = {}, dragging = {};
 

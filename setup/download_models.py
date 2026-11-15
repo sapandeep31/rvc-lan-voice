@@ -5,6 +5,7 @@ Kafka ships in git. Narrator (48 kHz RVC v2, MIT, by 7TearZZZ on HuggingFace) is
 
 Usage (from the repo root, with the server's Python):  python setup/download_models.py
 Standard library only; every file is checked against its SHA-256 before it is moved into place.
+The Windows desktop app imports download() and fetch() and shows the progress lines in its window.
 """
 import hashlib
 import sys
@@ -31,12 +32,17 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def fetch(url: str, dest: Path, expected: str) -> None:
+class ChecksumError(RuntimeError):
+    pass
+
+
+def fetch(url: str, dest: Path, expected: str, report=print) -> None:
+    """Download url to dest unless dest already has the expected SHA-256; report() gets progress lines."""
     if dest.exists() and sha256(dest) == expected:
-        print(f"  ok      {dest.relative_to(ROOT)} (already downloaded)")
+        report(f"  ok      {dest.name} (already downloaded)")
         return
     tmp = dest.with_suffix(dest.suffix + ".part")
-    print(f"  get     {url}")
+    report(f"  get     {url}")
     with urllib.request.urlopen(url) as r, open(tmp, "wb") as f:
         total = int(r.headers.get("Content-Length", 0))
         done, shown = 0, -1
@@ -44,24 +50,31 @@ def fetch(url: str, dest: Path, expected: str) -> None:
             f.write(block)
             done += len(block)
             if total and (pct := done * 100 // total // 10 * 10) != shown:
-                print(f"          {pct:3d}% of {total >> 20} MB", flush=True)
+                report(f"          {dest.name}: {pct:3d}% of {total >> 20} MB")
                 shown = pct
     actual = sha256(tmp)
     if actual != expected:
         tmp.unlink()
-        sys.exit(f"Checksum mismatch for {dest.name}: expected {expected}, got {actual}")
+        raise ChecksumError(f"Checksum mismatch for {dest.name}: expected {expected}, got {actual}")
     tmp.replace(dest)
-    print(f"  ok      {dest.relative_to(ROOT)}")
+    report(f"  ok      {dest.name}")
+
+
+def download(models_dir: Path, report=print) -> None:
+    for name, files in MODELS.items():
+        report(f"{name}:")
+        folder = models_dir / name
+        folder.mkdir(parents=True, exist_ok=True)
+        for filename, digest in files:
+            fetch(f"{RELEASE}/{filename}", folder / filename, digest, report)
+    report("Models ready.")
 
 
 def main() -> None:
-    for name, files in MODELS.items():
-        print(f"{name}:")
-        folder = ROOT / "models" / name
-        folder.mkdir(parents=True, exist_ok=True)
-        for filename, digest in files:
-            fetch(f"{RELEASE}/{filename}", folder / filename, digest)
-    print("Models ready.")
+    try:
+        download(ROOT / "models", lambda line: print(line, flush=True))
+    except ChecksumError as e:
+        sys.exit(str(e))
 
 
 if __name__ == "__main__":

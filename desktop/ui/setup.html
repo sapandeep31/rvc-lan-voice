@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>RVC Voice setup</title>
+<style>
+  :root { --bg:#111418; --card:#1b2027; --line:#2a313b; --text:#e8ecf1; --muted:#8b95a3; --accent:#7c9cff; --ok:#3ecf8e; --warn:#f5b84b; --bad:#ef5b5b; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.45 "Segoe UI",-apple-system,system-ui,sans-serif; }
+  main { max-width:600px; margin:0 auto; padding:20px 16px 8px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  h2 { font-size:16px; margin:0 0 8px; }
+  .lead { color:var(--muted); margin:0 0 16px; }
+  .card { background:var(--card); border-radius:12px; padding:16px; margin-bottom:12px; }
+  .hint { color:var(--muted); font-size:13px; margin-top:4px; }
+  .row { margin:0 0 14px; }
+  label { display:block; font-weight:600; }
+  select { width:100%; margin-top:6px; padding:10px; background:var(--line); color:var(--text); border:0; border-radius:8px; font:inherit; }
+  .btn { background:var(--accent); color:#0b0e12; border:0; border-radius:8px; padding:11px 16px; font:inherit; font-weight:600; cursor:pointer; width:100%; }
+  .btn.ghost { background:var(--line); color:var(--text); width:auto; }
+  .btn:disabled { opacity:.5; cursor:default; }
+  .btn:focus-visible, select:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .gpu { display:flex; gap:10px; align-items:flex-start; }
+  .dot { flex:none; width:10px; height:10px; border-radius:50%; margin-top:6px; background:var(--muted); }
+  ul.plain { margin:0; padding-left:20px; color:var(--muted); font-size:14px; }
+  ul.plain li { margin:3px 0; }
+  ol.steps { list-style:none; margin:0; padding:0; }
+  ol.steps li { display:flex; gap:12px; padding:9px 0; border-bottom:1px solid var(--line); }
+  ol.steps li:last-child { border-bottom:0; }
+  .icon { flex:none; width:22px; height:22px; border-radius:50%; display:grid; place-items:center; font-size:13px; font-weight:700; background:var(--line); color:var(--muted); }
+  .running .icon { background:transparent; border:3px solid var(--line); border-top-color:var(--accent); animation:spin .9s linear infinite; }
+  .done .icon { background:var(--ok); color:#0b0e12; }
+  .warn .icon { background:var(--warn); color:#0b0e12; }
+  .error .icon { background:var(--bad); color:#0b0e12; }
+  .pending .name { color:var(--muted); }
+  .detail { color:var(--muted); font-size:13px; overflow-wrap:anywhere; }
+  .warn .detail { color:var(--warn); }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .running .icon { animation:none; border-top-color:var(--accent); } }
+  #error { background:#3a2023; border:1px solid #6b2f35; color:#ffc9cd; border-radius:10px; padding:12px; margin-bottom:12px; white-space:pre-wrap; overflow-wrap:anywhere; font-size:14px; }
+  .actions { display:flex; gap:8px; flex-wrap:wrap; }
+  pre { background:#0c0f13; color:#aab4c0; border-radius:8px; padding:10px; font-size:12px; max-height:220px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; margin:10px 0 0; }
+  details summary { cursor:pointer; color:var(--muted); font-size:13px; }
+  footer { text-align:center; color:var(--muted); font-size:13px; padding:6px 0 18px; }
+  footer button { background:none; border:0; color:var(--accent); font:inherit; font-weight:600; cursor:pointer; padding:0; text-decoration:underline; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>RVC Voice</h1>
+  <p class="lead">Change your voice live for games and Discord. Everything runs on this PC.</p>
+
+  <section id="welcome" data-testid="empty-setup" hidden>
+    <div class="card gpu">
+      <span class="dot" id="gpu-dot"></span>
+      <div>
+        <div id="gpu-title">Looking for your graphics card…</div>
+        <div class="hint" id="gpu-hint"></div>
+      </div>
+    </div>
+    <form class="card" id="install-form" data-testid="form-install">
+      <div class="row">
+        <label for="input">Your microphone</label>
+        <select id="input" required></select>
+      </div>
+      <div class="row">
+        <label for="monitor">Your headphones or speakers</label>
+        <select id="monitor" required></select>
+        <div class="hint">Used to play a test of your new voice. Headphones are best.</div>
+      </div>
+      <button type="submit" class="btn" id="install" data-testid="submit-install">Install and start</button>
+      <div class="hint" id="form-msg" role="status"></div>
+    </form>
+    <div class="card">
+      <h2>What gets installed</h2>
+      <ul class="plain">
+        <li>The AI voice software and its base files: about 6 GB to download, 12 GB of free disk space.</li>
+        <li>VB-Cable, a free virtual audio cable by VB-Audio. It carries your new voice into games and Discord. Windows may ask you to confirm the driver: click Install.</li>
+        <li>One voice (Narrator). You can add more later.</li>
+      </ul>
+      <div class="hint">It takes about 10 to 20 minutes on a fast connection, once. Later starts take under a minute.</div>
+    </div>
+  </section>
+
+  <section id="progress" data-testid="loading-setup" hidden>
+    <div id="error" role="alert" data-testid="error-setup" hidden></div>
+    <div class="card actions" id="error-actions" hidden>
+      <button type="button" class="btn ghost" id="retry" data-testid="submit-retry">Try again</button>
+      <button type="button" class="btn ghost" id="vbcable" hidden>Open the VB-Cable website</button>
+    </div>
+    <div class="card">
+      <ol class="steps" id="steps"></ol>
+    </div>
+    <div class="card">
+      <details>
+        <summary>Show details</summary>
+        <pre id="log"></pre>
+      </details>
+    </div>
+  </section>
+
+  <footer>Made by Sapandeep Singh · <button type="button" id="linkedin" data-testid="link-linkedin">Follow me on LinkedIn</button></footer>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const post = (url, body) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+const ICONS = { pending: "", running: "", done: "✓", warn: "!", error: "✕" };
+let devicesLoaded = false, leaving = false;
+
+async function loadDevices() {
+  const d = await (await fetch("/api/devices")).json();
+  const fill = (id, list) => $(id).replaceChildren(...list.map(x => new Option(x.name, x.name, x.default, x.default)));
+  fill("input", d.inputs.filter(x => !/^CABLE /i.test(x.name)));
+  fill("monitor", d.outputs.filter(x => x.name !== d.cable));
+  devicesLoaded = true;
+  $("install").disabled = !$("input").value || !$("monitor").value;
+  $("form-msg").textContent = !$("input").value ? "No microphone found. Plug one in, then reopen the app."
+    : !$("monitor").value ? "No headphones or speakers found. Plug them in, then reopen the app." : "";
+}
+
+function renderGpu(s) {
+  if (!s.gpu_checked) return;
+  $("gpu-dot").style.background = s.gpu ? "var(--ok)" : "var(--warn)";
+  $("gpu-title").textContent = s.gpu ? s.gpu.name : "No NVIDIA graphics card found";
+  $("gpu-hint").textContent = s.gpu ? "NVIDIA card found. The voice will run on it."
+    : "This app needs an NVIDIA graphics card to change your voice live. Without one it still installs, but the voice will lag.";
+}
+
+function render(s) {
+  const working = s.phase !== "welcome";
+  $("welcome").hidden = working;
+  $("progress").hidden = !working;
+  if (!working) { renderGpu(s); if (!devicesLoaded) loadDevices(); return; }
+  $("steps").replaceChildren(...s.steps.map(step => {
+    const li = document.createElement("li"); li.className = step.status;
+    const icon = document.createElement("span"); icon.className = "icon"; icon.textContent = ICONS[step.status];
+    const text = document.createElement("div");
+    const name = document.createElement("div"); name.className = "name"; name.textContent = step.label;
+    const detail = document.createElement("div"); detail.className = "detail"; detail.textContent = step.detail;
+    text.append(name, detail); li.append(icon, text); return li;
+  }));
+  const log = $("log"), atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
+  log.textContent = s.log.join("\n");
+  if (atEnd) log.scrollTop = log.scrollHeight;
+  const failed = s.phase === "error";
+  $("error").hidden = $("error-actions").hidden = !failed;
+  if (failed) {
+    $("error").textContent = s.error;
+    $("vbcable").hidden = !s.steps.some(x => x.id === "cable" && x.status === "error");
+  }
+  if (s.phase === "ready" && s.engine_url && !leaving) { leaving = true; location.href = s.engine_url + "/app"; }
+}
+
+async function poll() {
+  try { render(await (await fetch("/api/state")).json()); } catch (e) {}
+}
+
+$("install-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  $("install").disabled = true;
+  const r = await post("/api/install", { input: $("input").value, monitor: $("monitor").value });
+  if (!r.ok) { $("form-msg").textContent = (await r.json()).detail; $("install").disabled = false; }
+  poll();
+});
+$("retry").addEventListener("click", () => post("/api/retry").then(poll));
+$("vbcable").addEventListener("click", () => post("/api/open/vbcable"));
+$("linkedin").addEventListener("click", () => post("/api/open/linkedin"));
+poll(); setInterval(poll, 600);
+</script>
+</body>
+</html>
