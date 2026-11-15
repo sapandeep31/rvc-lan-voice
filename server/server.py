@@ -66,6 +66,23 @@ else:
 
 server_cfg = config.get("server", {})
 
+# Tuned settings per voice, keyed by model folder name (lowercase); saved whenever the panel changes one.
+# Local to this machine (gitignored); config.json "server" defaults apply to voices with no entry.
+VOICE_SETTINGS_PATH = CONFIG_PATH.parent / "voice_settings.json"
+LAST_VOICE_KEY = "_last_voice"
+VOICE_SETTING_KEYS = ("pitch", "formant_shift", "index_ratio", "chunk_size", "context_seconds")
+
+
+class UnknownVoiceError(RuntimeError):
+    pass
+
+
+def load_voice_settings() -> dict:
+    if not VOICE_SETTINGS_PATH.exists():
+        return {}
+    with open(VOICE_SETTINGS_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
 app = FastAPI(title="RVC LAN Audio Server", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
@@ -123,6 +140,7 @@ class VoiceEngine:
         self.current_silent_threshold = server_cfg.get("silent_threshold", -75)
         self.chunk_size = server_cfg.get("chunk_size", 40)
         self.context_seconds = server_cfg.get("extra_convert_size", 0.4)
+        self.model_name = server_cfg.get("default_model", "kafka").lower()
         self.total_processed_chunks = 0
         self.avg_inference_ms = 0.0
         self.last_inference_ms = 0.0
@@ -136,15 +154,7 @@ class VoiceEngine:
 
     def initialize(self):
         logger.info("Initializing voice conversion engine...")
-        from voiceconversion.common.deviceManager.DeviceManager import (
-            DeviceManager,
-            DeviceManagerContext,
-        )
-        from voiceconversion.data.imported_model_info import RVCImportedModelInfo
         from voiceconversion.downloader.WeightDownloader import downloadWeight
-        from voiceconversion.RVC.RVCr2 import RVCr2
-        from voiceconversion.voice_changer_settings import VoiceChangerSettings
-        from voiceconversion.VoiceChangerV2 import VoiceChangerV2
 
         # Detect best device on this machine (Mac MPS / CUDA / CPU)
         if torch.backends.mps.is_available():
@@ -175,29 +185,64 @@ class VoiceEngine:
         except Exception as e:
             logger.warning(f"Could not download pretrain weights automatically: {e}")
 
-        # Each voice lives in models/<Name>/ (one .safetensors or .pth, optionally one .index);
-        # config "default_model" picks the folder by name, case-insensitive.
-        model_name = server_cfg.get("default_model", "kafka")
-        model_dirs = {d.name.lower(): d for d in models_dir.iterdir() if d.is_dir()}
-        model_dir = model_dirs.get(model_name.lower())
+        self.models_dir = models_dir
+        self.pretrain_dir = pretrain_dir
+        # The panel's last pick wins over config "default_model"
+        self.load_voice(load_voice_settings().get(LAST_VOICE_KEY) or server_cfg.get("default_model", "kafka"))
+
+        logger.info("Voice conversion engine successfully initialized and ready!")
+
+    def voice_dirs(self) -> dict[str, Path]:
+        """Each voice lives in models/<Name>/ (one .safetensors or .pth, optionally one .index)."""
+        return {
+            d.name.lower(): d
+            for d in sorted(self.models_dir.iterdir())
+            if d.is_dir() and (any(d.glob("*.safetensors")) or any(d.glob("*.pth")))
+        }
+
+    def load_voice(self, model_name: str):
+        """Load a voice by folder name (case-insensitive) with its saved settings. Runs on the model thread;
+        the current voice keeps playing if loading fails."""
+        model_dir = self.voice_dirs().get(model_name.lower())
         if model_dir is None:
-            raise RuntimeError(f"Voice model '{model_name}' not found; available: {sorted(model_dirs)}")
+            raise UnknownVoiceError(f"Voice model '{model_name}' not found; available: {sorted(self.voice_dirs())}")
         weights = sorted(model_dir.glob("*.safetensors")) or sorted(model_dir.glob("*.pth"))
         if not weights:
             raise RuntimeError(f"No .safetensors or .pth file in {model_dir}")
-        model_file = str(weights[0])
         indexes = sorted(model_dir.glob("*.index"))
         index_file = str(indexes[0]) if indexes else ""
-        sampling_rate = _model_sampling_rate(weights[0])
+        previous = (self.model_name, self.current_pitch, self.current_formant, self.current_index_ratio,
+                    self.chunk_size, self.context_seconds)
+        self.model_name = model_dir.name.lower()
+        self.reset_to_voice_settings()
+        try:
+            self._build_voice(model_dir, weights[0], index_file)
+        except Exception:
+            (self.model_name, self.current_pitch, self.current_formant, self.current_index_ratio,
+             self.chunk_size, self.context_seconds) = previous
+            raise
+
+    def _build_voice(self, model_dir: Path, weights: Path, index_file: str):
+        from voiceconversion.common.deviceManager.DeviceManager import (
+            DeviceManager,
+            DeviceManagerContext,
+        )
+        from voiceconversion.data.imported_model_info import RVCImportedModelInfo
+        from voiceconversion.RVC.RVCr2 import RVCr2
+        from voiceconversion.voice_changer_settings import VoiceChangerSettings
+        from voiceconversion.VoiceChangerV2 import VoiceChangerV2
+
+        model_file = str(weights)
+        sampling_rate = _model_sampling_rate(weights)
 
         logger.info(f"Using voice model: {model_file}")
         logger.info(f"Using feature index: {index_file}")
 
-        self.model_info = RVCImportedModelInfo(
+        model_info = RVCImportedModelInfo(
             id=0,
             storageDir=str(Path(model_file).parent) if model_file else "",
             voiceChangerType="RVC",
-            name=model_name,
+            name=model_dir.name,
             description="",
             credit="",
             termsOfUseUrl="",
@@ -239,16 +284,22 @@ class VoiceEngine:
             silenceFront=1,
             forceFp32=server_cfg.get("force_fp32", True),
             disableJit=0,
-            rvcImportedModelInfo=self.model_info,
+            rvcImportedModelInfo=model_info,
         )
 
         with DeviceManagerContext():
             dm = DeviceManager.get_instance()
             dm.initialize(settings.gpu, settings.forceFp32, settings.disableJit)
-            self.vc = VoiceChangerV2(settings)
-            self.vc.initialize(RVCr2(settings), str(pretrain_dir))
+            vc = VoiceChangerV2(settings)
+            vc.initialize(RVCr2(settings), str(self.pretrain_dir))
 
-        logger.info("Voice conversion engine successfully initialized and ready!")
+        # Swap only once the new voice loaded; every stream restarts with fresh buffers
+        self.vc, self.model_info = vc, model_info
+        self.streams.clear()
+        self.active_stream = None
+        self.avg_inference_ms = 0.0
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
 
     def process_chunk(self, audio_chunk: np.ndarray, stream_id: Optional[int] = None) -> np.ndarray:
         if self.vc is None:
@@ -323,6 +374,37 @@ class VoiceEngine:
             block_frame, self.vc.extra_frame, self.vc.crossfade_frame, self.vc.sola_search_frame
         )
         self.vc._generate_strength()
+
+    def reset_to_voice_settings(self):
+        self.current_pitch = server_cfg.get("default_pitch", 7)
+        self.current_formant = server_cfg.get("default_formant", 0.7)
+        self.current_index_ratio = server_cfg.get("default_index_ratio", 0.4)
+        self.chunk_size = server_cfg.get("chunk_size", 40)
+        self.context_seconds = server_cfg.get("extra_convert_size", 0.4)
+        saved = load_voice_settings().get(self.model_name)
+        if not saved:
+            return
+        self.current_pitch = saved.get("pitch", self.current_pitch)
+        self.current_formant = saved.get("formant_shift", self.current_formant)
+        self.current_index_ratio = saved.get("index_ratio", self.current_index_ratio)
+        self.chunk_size = saved.get("chunk_size", self.chunk_size)
+        self.context_seconds = saved.get("context_seconds", self.context_seconds)
+        logger.info(f"Loaded saved settings for voice '{self.model_name}': {saved}")
+
+    def save_voice_settings(self):
+        all_settings = load_voice_settings()
+        all_settings[LAST_VOICE_KEY] = self.model_name
+        all_settings[self.model_name] = {
+            "pitch": self.current_pitch,
+            "formant_shift": self.current_formant,
+            "index_ratio": self.current_index_ratio,
+            "chunk_size": self.chunk_size,
+            "context_seconds": self.context_seconds,
+        }
+        tmp = VOICE_SETTINGS_PATH.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(all_settings, f, indent=2)
+        tmp.replace(VOICE_SETTINGS_PATH)
 
     def set_context(self, seconds: float):
         """Change how much past audio the model sees. Runs on the model thread; every stream restarts
@@ -480,7 +562,29 @@ async def set_settings(updates: SettingsUpdate):
     engine.update_settings(updates)
     if updates.context_seconds is not None and engine.vc is not None:
         await asyncio.get_running_loop().run_in_executor(model_executor, engine.set_context, updates.context_seconds)
+    if any(getattr(updates, k) is not None for k in VOICE_SETTING_KEYS):
+        engine.save_voice_settings()
     return {"status": "ok", "settings": updates.model_dump()}
+
+
+class VoiceSelect(BaseModel):
+    name: str
+
+
+@app.get("/voices")
+def list_voices():
+    return {"voices": [d.name for d in engine.voice_dirs().values()], "current": engine.model_info.name if engine.model_info else None}
+
+
+@app.post("/voice")
+async def select_voice(req: VoiceSelect):
+    try:
+        await asyncio.get_running_loop().run_in_executor(model_executor, engine.load_voice, req.name)
+    except UnknownVoiceError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    engine.save_voice_settings()
+    logger.info(f"Switched voice to {engine.model_info.name}")
+    return {"status": "ok", "voice": engine.model_info.name}
 
 
 @app.websocket("/ws/voice")

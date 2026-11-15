@@ -26,6 +26,7 @@
   .row .val { font-variant-numeric:tabular-nums; color:var(--accent); }
   .row .hint { color:var(--muted); font-size:12px; margin-top:2px; }
   input[type=range] { width:100%; margin-top:8px; accent-color:var(--accent); }
+  select { width:100%; margin-top:8px; padding:9px 10px; background:#2a313b; color:var(--text); border:0; border-radius:8px; font:inherit; }
   .msg { color:var(--muted); font-size:12px; min-height:16px; }
 </style>
 </head>
@@ -42,6 +43,11 @@
   </section>
 
   <section class="card" aria-label="Voice settings">
+    <div class="row">
+      <label for="voice">Voice</label>
+      <select id="voice"></select>
+      <div class="hint">Switches in a few seconds without disconnecting. Each voice remembers its own sliders.</div>
+    </div>
     <div class="row">
       <label for="pitch">Pitch <span class="val" id="pitch-v"></span></label>
       <input type="range" id="pitch" min="-24" max="24" step="1">
@@ -109,9 +115,34 @@ for (const id of Object.keys(fields)) {
   });
 }
 
+let switching = false;
+async function loadVoices() {
+  try {
+    const v = await (await fetch("/voices")).json();
+    $("voice").innerHTML = v.voices.map(n => `<option value="${n}">${n}</option>`).join("");
+    if (v.current) $("voice").value = v.current;
+  } catch (e) {}
+}
+$("voice").addEventListener("change", async e => {
+  const name = e.target.value;
+  switching = true; $("voice").disabled = true;
+  $("msg").textContent = `Loading ${name}…`;
+  try {
+    const r = await fetch("/voice", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+    const j = await r.json();
+    $("msg").textContent = r.ok ? `Now using ${j.voice}` : "Could not switch: " + j.detail;
+  } catch (err) { $("msg").textContent = "Could not reach server"; }
+  for (const id of Object.keys(fields)) touchedAt[id] = 0;  // follow the new voice's saved sliders right away
+  switching = false; $("voice").disabled = false; poll();
+});
+
 async function poll() {
   try {
     const h = await (await fetch("/health")).json();
+    if (!switching && h.model) {
+      if (![...$("voice").options].some(o => o.value === h.model)) await loadVoices();
+      if ($("voice").value !== h.model) $("voice").value = h.model;
+    }
     const on = h.connected_clients > 0;
     // Follow the server (another panel may have changed it) unless this slider is being edited here
     for (const [id, key] of [["pitch","pitch"],["formant_shift","formant"],["index_ratio","index_ratio"],["silent_threshold","silent_threshold"],["chunk_size","chunk_size"],["context_seconds","context_seconds"]]) {
@@ -144,7 +175,7 @@ $("calibrate").addEventListener("click", async () => {
   } catch (e) { $("msg").textContent = "Could not reach server"; }
   calibrating = false; poll();
 });
-poll(); setInterval(poll, 700);
+loadVoices().then(poll); setInterval(poll, 700);
 </script>
 </body>
 </html>

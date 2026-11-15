@@ -41,3 +41,6 @@ Thumbs.db
 # Voice models downloaded locally (large binaries); only Kafka is tracked
 models/*
 !models/Kafka/
+
+# Per-voice tuned settings, saved by the server on this machine
+voice_settings.json

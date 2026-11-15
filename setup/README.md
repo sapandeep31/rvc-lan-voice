@@ -51,8 +51,9 @@ cd rvc-lan-voice
 Open the control panel on any phone or computer on the same Wi-Fi: `http://<server_ip>:<port>/panel`.
 Every slider applies live, and all open panels stay in sync.
 
-| Slider | What it does |
+| Control | What it does |
 |---|---|
+| Voice | Switches between the voices in `models/` in a few seconds, without disconnecting. Each voice remembers its own sliders. |
 | Pitch | Semitones up. Male to female voice is usually 9 to 12. |
 | Formant | Timbre. Lower sounds fuller and more mature, higher sounds younger. |
 | Index ratio | How much it sounds like the model. Lower is clearer, especially for Hindi or other non-English speech. |
@@ -60,9 +61,10 @@ Every slider applies live, and all open panels stay in sync.
 | Chunk | Audio per packet. Smaller means less delay; keep "Processing per chunk" green. |
 | Context | Past audio the model hears. More gives clearer words, costs more processing, and adds no delay. |
 
-The panel resets to the defaults when the server restarts. To make your values permanent, put them in
-`config.json` under `"server"` (`default_pitch`, `default_formant`, `default_index_ratio`, `silent_threshold`,
-`chunk_size`, `extra_convert_size`).
+The server saves each voice's pitch, formant, index ratio, chunk and context to `voice_settings.json`
+(on the server, not in git) as you move the sliders, and reopens the last voice you picked after a restart.
+Voices you have not tuned start from the `config.json` `"server"` defaults (`default_pitch`, `default_formant`,
+`default_index_ratio`, `chunk_size`, `extra_convert_size`); the noise gate (`silent_threshold`) is shared by all voices.
 
 ## Voices
 
@@ -72,7 +74,7 @@ The panel resets to the defaults when the server restarts. To make your values p
 | Kafka | In the repo | `"default_model": "kafka"` |
 
 Other RVC v2 voices: make a folder `models/<Name>/` with one `.safetensors` (or `.pth`) and optionally one
-`.index`, set `"default_model": "<name>"`, then restart the server. Only use voices you have the rights to,
+`.index`, restart the server, then pick it in the panel's Voice list. Only use voices you have the rights to,
 and never clone a real person without their consent.
 
 ## Troubleshooting
