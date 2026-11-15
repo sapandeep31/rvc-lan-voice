@@ -283,7 +283,8 @@ class App:
         wanted = " ".join(PACKAGES) + f" | torch {backend}"
         if not (marker.exists() and marker.read_text(encoding="utf-8") == wanted):
             # One resolution with the right PyTorch index: installing torch separately lets the next
-            # install replace it with the CPU build from PyPI.
+            # install replace it with the CPU build from PyPI. --reinstall-package: an environment that
+            # already has another build (new graphics card, driver fixed) must switch, not keep it.
             done = threading.Event()
 
             def show_size():
@@ -293,7 +294,8 @@ class App:
             threading.Thread(target=show_size, daemon=True).start()
             try:
                 self.run_logged([HOME / "bin" / "uv.exe", "pip", "install", "--python", self.venv_python,
-                                 "--torch-backend", backend, *PACKAGES], env=self.uv_env())
+                                 "--torch-backend", backend, "--reinstall-package", "torch",
+                                 "--reinstall-package", "torchaudio", *PACKAGES], env=self.uv_env())
             finally:
                 done.set()
             marker.write_text(wanted, encoding="utf-8")
@@ -374,12 +376,12 @@ class App:
 
         (HOME / "logs").mkdir(exist_ok=True)
         engine_log = open(HOME / "logs" / "engine.log", "w", encoding="utf-8")
-        env = {**os.environ, "RVC_CONFIG": str(config_path), "RVC_EXIT_WITH_PARENT": "1", "PYTHONUNBUFFERED": "1",
-               "PYTHONIOENCODING": "utf-8"}
+        env = {**os.environ, "RVC_CONFIG": str(config_path), "RVC_PARENT_PID": str(os.getpid()),
+               "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
         self.engine = subprocess.Popen(
             [str(self.venv_python), "-m", "uvicorn", "--app-dir", str(code_dir / "server"), "server:app",
              "--host", "127.0.0.1", "--port", str(port)],
-            stdin=subprocess.PIPE, stdout=engine_log, stderr=subprocess.STDOUT, env=env, cwd=str(code_dir),
+            stdin=subprocess.DEVNULL, stdout=engine_log, stderr=subprocess.STDOUT, env=env, cwd=str(code_dir),
             creationflags=NO_WINDOW,
         )
         url = f"http://127.0.0.1:{port}"
@@ -414,8 +416,7 @@ class App:
         proc, self.engine = self.engine, None
         if proc is None or proc.poll() is not None:
             return
-        with contextlib.suppress(OSError):
-            proc.stdin.close()      # the engine exits when this pipe closes
+        proc.terminate()
         try:
             proc.wait(timeout=8)
         except subprocess.TimeoutExpired:

@@ -41,6 +41,8 @@ jobs:
           Import-Certificate -FilePath vb\vb.cer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher
 
       - name: End-to-end test
+        env:
+          RVC_DEBUG_STACKS: "300"   # if the engine hangs, its log shows where
         run: |
           python -m pip install --quiet sounddevice numpy pillow
           python desktop\tests\e2e_windows.py
@@ -54,8 +56,10 @@ jobs:
           $uv = "$env:LOCALAPPDATA\RVCVoice\bin\uv.exe"
           $py = "$env:LOCALAPPDATA\RVCVoice\venv\Scripts\python.exe"
           foreach ($backend in "cu126", "cu128") {
-            & $uv pip install --dry-run --python $py --torch-backend $backend "voiceconversion==0.0.8" fastapi "uvicorn[standard]" websockets "numpy<2" pydantic 2>&1 | Select-String -Pattern "torch|error|Would" | Select-Object -First 12
-            if ($LASTEXITCODE -ne 0) { exit 1 }
+            $out = & $uv pip install --dry-run --python $py --torch-backend $backend --reinstall-package torch --reinstall-package torchaudio "voiceconversion==0.0.8" fastapi "uvicorn[standard]" websockets "numpy<2" pydantic 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { Write-Output $out; exit 1 }
+            $out -split "`n" | Select-String -Pattern "torch" | Select-Object -First 8
+            if ($out -notmatch "torch==[0-9.]+\+$backend") { Write-Output "No +$backend PyTorch build in the plan"; exit 1 }
           }
 
       - uses: actions/upload-artifact@v4

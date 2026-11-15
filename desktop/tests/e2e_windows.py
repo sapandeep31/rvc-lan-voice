@@ -95,7 +95,7 @@ def main():
     make_voice_like_wav(wav)
 
     selftest = OUT / "selftest.json"
-    code = subprocess.run([str(EXE), "--selftest", str(selftest)]).returncode
+    code = subprocess.run([str(EXE), "--selftest", str(selftest)], timeout=120).returncode
     print(selftest.read_text() if selftest.exists() else "(no selftest output)")
     check("exe self-test (bundled files, web view import)", code == 0)
 
@@ -110,8 +110,11 @@ def main():
         status, _ = post(API + "/api/install", {"input": f"wav:{wav}", "monitor": monitor})
         check("install accepted", status == 200)
 
-        state = wait_setup(minutes=50)
+        state = wait_setup(minutes=30)
         print("\n".join(state["log"][-40:]))
+        if state["phase"] != "ready" and (HOME / "logs" / "engine.log").exists():
+            print("---- engine.log ----")
+            print((HOME / "logs" / "engine.log").read_text(encoding="utf-8", errors="replace")[-6000:])
         check("setup finished", state["phase"] == "ready", state.get("error") or "")
         if state["phase"] != "ready":
             return
@@ -150,6 +153,40 @@ def main():
             check("no audio error while on", st["on"] and not st["error"], str(st["error"]))
             status, body = post(engine + "/audio/power", {"on": False})
             check("switch off", status == 200 and body.get("on") is False)
+
+            # Self check through a real Windows microphone device. The machine's only devices are the
+            # cable's two ends, so: play the WAV into the cable, let the engine record the cable's other
+            # end as its microphone, and listen for its converted playback coming back through the cable.
+            mic_name = next(d["name"] for d in audio_devices["inputs"] if "CABLE Output" in d["name"])
+            status, body = post(engine + "/audio/settings", {"input": mic_name, "monitor": audio_devices["cable"]})
+            check("choose devices", status == 200, str(body)[:200])
+            with wave.open(str(wav)) as w:
+                tone = np.frombuffer(w.readframes(w.getnframes()), np.int16).astype(np.float32) / 32768
+            out_dev = next(i for i, d in enumerate(sd.query_devices())
+                           if d["hostapi"] == api and d["max_output_channels"] > 0 and "CABLE Input" in d["name"])
+            sd.play(tone[:int(4.5 * 48000)], 48000, device=out_dev, extra_settings=sd.WasapiSettings(auto_convert=True))
+            status, body = post(engine + "/audio/test", {"seconds": 4})
+            check("self check starts recording", status == 200 and body.get("test") == "recording", str(body)[:200])
+            mic_level, deadline = 0.0, time.time() + 30
+            while time.time() < deadline:
+                st = get(engine + "/audio/status")
+                mic_level = max(mic_level, st["input_level"])
+                if st["test"] != "recording":
+                    break
+                time.sleep(0.3)
+            sd.stop()
+            check("engine hears the Windows microphone device", mic_level > 0.003, f"peak level {mic_level:.4f}")
+            check("self check plays back", st["test"] == "playing", st["test"])
+            rec = sd.rec(int(3 * rate), samplerate=rate, channels=1, device=rec_dev, dtype="float32")
+            sd.wait()
+            rms = float(np.sqrt(np.mean(rec ** 2)))
+            check("self-check playback is audible", rms > 0.003, f"rms {rms:.4f}")
+            for _ in range(40):
+                st = get(engine + "/audio/status")
+                if st["test"] == "idle":
+                    break
+                time.sleep(0.5)
+            check("self check finishes", st["test"] == "idle" and not st["error"], str(st["error"]))
         else:
             check("VB-Cable visible to the engine", False, "no CABLE Input device")
 

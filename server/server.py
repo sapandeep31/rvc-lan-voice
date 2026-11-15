@@ -30,6 +30,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("RVC-Server")
 faulthandler.enable()  # native crashes (torch/faiss/onnx) print a Python stack instead of dying silently
+if os.environ.get("RVC_DEBUG_STACKS"):
+    # Diagnosing a hang: print every thread's stack to the log every N seconds
+    faulthandler.dump_traceback_later(int(os.environ["RVC_DEBUG_STACKS"]), repeat=True)
 
 
 def _init_model_thread():
@@ -463,18 +466,34 @@ def streaming_sources() -> int:
     return engine.connected_clients + (1 if local_audio.streaming else 0)
 
 
-def _exit_when_parent_closes():
-    """The desktop app holds our stdin; when it exits (or crashes) the pipe closes and we stop too,
-    so the mic and GPU are never left held by an orphaned engine."""
-    sys.stdin.buffer.read()
+def _exit_when_parent_closes(parent_pid: int):
+    """Stop when the desktop app that started us exits (or crashes), so the mic and GPU are never left
+    held by an orphaned engine. Waits on the parent process itself: a thread blocked reading a stdin
+    pipe would hang any child process started meanwhile on Windows."""
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        handle = kernel32.OpenProcess(0x00100000, False, parent_pid)   # SYNCHRONIZE
+        if not handle:
+            logger.warning(f"Cannot watch parent process {parent_pid}; not exiting with it")
+            return
+        kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)                # INFINITE
+    else:
+        while os.getppid() == parent_pid:
+            time.sleep(1)
     logger.info("Parent app closed; shutting down")
     os._exit(0)
 
 
 @app.on_event("startup")
 async def startup_event():
-    if os.environ.get("RVC_EXIT_WITH_PARENT") == "1":
-        threading.Thread(target=_exit_when_parent_closes, name="parent-watch", daemon=True).start()
+    if os.environ.get("RVC_PARENT_PID"):
+        threading.Thread(target=_exit_when_parent_closes, args=(int(os.environ["RVC_PARENT_PID"]),),
+                         name="parent-watch", daemon=True).start()
     try:
         await asyncio.get_running_loop().run_in_executor(model_executor, engine.initialize)
     except Exception as e:
