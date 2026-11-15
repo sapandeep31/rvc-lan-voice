@@ -8,6 +8,7 @@ Drives dist\\RVCVoice.exe the way its window does, through the setup API:
   5. quitting stops the engine.
 Needs: pip install sounddevice numpy pillow. Exit code 0 = all checks passed.
 """
+
 import json
 import math
 import os
@@ -15,6 +16,7 @@ import struct
 import subprocess
 import sys
 import time
+import traceback
 import urllib.request
 import wave
 from pathlib import Path
@@ -32,7 +34,9 @@ def get(url):
 
 
 def post(url, body=None):
-    req = urllib.request.Request(url, data=json.dumps(body or {}).encode(), headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        url, data=json.dumps(body or {}).encode(), headers={"Content-Type": "application/json"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=120) as r:
             return r.status, json.load(r)
@@ -53,7 +57,7 @@ def make_voice_like_wav(path: Path, seconds=6.0):
         t = n / rate
         f0 = 150 * (1 + 0.03 * math.sin(2 * math.pi * 5 * t))
         s = sum(math.sin(2 * math.pi * f0 * k * t) / k for k in range(1, 9))
-        env = 0.5 * (1 - math.cos(2 * math.pi * 2.5 * t))   # 2.5 "syllables" a second
+        env = 0.5 * (1 - math.cos(2 * math.pi * 2.5 * t))  # 2.5 "syllables" a second
         frames.append(struct.pack("<h", int(max(-1, min(1, 0.25 * s * env)) * 32767)))
     with wave.open(str(path), "wb") as w:
         w.setnchannels(1), w.setsampwidth(2), w.setframerate(rate)
@@ -86,6 +90,7 @@ def wait_setup(minutes):
 
 def screenshot(name):
     from PIL import ImageGrab
+
     ImageGrab.grab().save(OUT / name)
 
 
@@ -99,7 +104,7 @@ def main():
     print(selftest.read_text() if selftest.exists() else "(no selftest output)")
     check("exe self-test (bundled files, web view import)", code == 0)
 
-    env = {**os.environ, "RVC_AUDIO_TEST": "1"}   # lets the engine accept "wav:<file>" as the microphone
+    env = {**os.environ, "RVC_AUDIO_TEST": "1"}  # lets the engine accept "wav:<file>" as the microphone
     app = subprocess.Popen([str(EXE), "--no-window", "--port", "8765"], env=env)
     try:
         state = wait_api()
@@ -129,66 +134,10 @@ def main():
         audio_devices = get(engine + "/audio/devices")
         print("engine sees:", audio_devices)
 
-        if audio_devices["cable"]:
-            import numpy as np
-            import sounddevice as sd
-            status, body = post(engine + "/audio/power", {"on": True})
-            check("switch on", status == 200 and body.get("on") is True, str(body)[:300])
-            time.sleep(6)   # first frames: buffers allocate, the model warms up
-            # Record what a game would hear: the cable's other end
-            api = next(i for i, a in enumerate(sd.query_hostapis()) if a["name"] == "Windows WASAPI")
-            rec_dev = next(i for i, d in enumerate(sd.query_devices())
-                           if d["hostapi"] == api and d["max_input_channels"] > 0 and "CABLE Output" in d["name"])
-            rate = int(sd.query_devices(rec_dev)["default_samplerate"])
-            rec = sd.rec(int(8 * rate), samplerate=rate, channels=1, device=rec_dev, dtype="float32")
-            sd.wait()
-            rms, peak = float(np.sqrt(np.mean(rec ** 2))), float(np.abs(rec).max())
-            st = get(engine + "/audio/status")
-            health = get(engine + "/health")
-            print("status while on:", st)
-            print(f"recorded from CABLE Output: rms {rms:.4f} peak {peak:.3f}; "
-                  f"processing {health['avg_inference_ms']} ms per {health['frame_samples'] / 48:.0f} ms frame; "
-                  f"underruns {st['underruns']}")
-            check("converted audio reaches CABLE Output", rms > 0.003, f"rms {rms:.4f}")
-            check("no audio error while on", st["on"] and not st["error"], str(st["error"]))
-            status, body = post(engine + "/audio/power", {"on": False})
-            check("switch off", status == 200 and body.get("on") is False)
-
-            # Self check through a real Windows microphone device. The machine's only devices are the
-            # cable's two ends, so: play the WAV into the cable, let the engine record the cable's other
-            # end as its microphone, and listen for its converted playback coming back through the cable.
-            mic_name = next(d["name"] for d in audio_devices["inputs"] if "CABLE Output" in d["name"])
-            status, body = post(engine + "/audio/settings", {"input": mic_name, "monitor": audio_devices["cable"]})
-            check("choose devices", status == 200, str(body)[:200])
-            with wave.open(str(wav)) as w:
-                tone = np.frombuffer(w.readframes(w.getnframes()), np.int16).astype(np.float32) / 32768
-            out_dev = next(i for i, d in enumerate(sd.query_devices())
-                           if d["hostapi"] == api and d["max_output_channels"] > 0 and "CABLE Input" in d["name"])
-            sd.play(tone[:int(4.5 * 48000)], 48000, device=out_dev, extra_settings=sd.WasapiSettings(auto_convert=True))
-            status, body = post(engine + "/audio/test", {"seconds": 4})
-            check("self check starts recording", status == 200 and body.get("test") == "recording", str(body)[:200])
-            mic_level, deadline = 0.0, time.time() + 30
-            while time.time() < deadline:
-                st = get(engine + "/audio/status")
-                mic_level = max(mic_level, st["input_level"])
-                if st["test"] != "recording":
-                    break
-                time.sleep(0.3)
-            sd.stop()
-            check("engine hears the Windows microphone device", mic_level > 0.003, f"peak level {mic_level:.4f}")
-            check("self check plays back", st["test"] == "playing", st["test"])
-            rec = sd.rec(int(3 * rate), samplerate=rate, channels=1, device=rec_dev, dtype="float32")
-            sd.wait()
-            rms = float(np.sqrt(np.mean(rec ** 2)))
-            check("self-check playback is audible", rms > 0.003, f"rms {rms:.4f}")
-            for _ in range(40):
-                st = get(engine + "/audio/status")
-                if st["test"] == "idle":
-                    break
-                time.sleep(0.5)
-            check("self check finishes", st["test"] == "idle" and not st["error"], str(st["error"]))
-        else:
-            check("VB-Cable visible to the engine", False, "no CABLE Input device")
+        try:
+            audio_phase(engine, audio_devices, wav)
+        except Exception:
+            check("audio phase ran to the end", False, traceback.format_exc())
 
         post(API + "/api/quit")
         app.wait(timeout=30)
@@ -198,26 +147,7 @@ def main():
             check("engine stops with the app", False, "still answering")
         except OSError:
             check("engine stops with the app", True)
-
-        # The real window: already set up, so it should go straight to the app page
-        win = subprocess.Popen([str(EXE)], env=env)
-        try:
-            time.sleep(4)
-            screenshot("window-1-starting.png")
-            deadline, opened = time.time() + 240, False
-            log_file = HOME / "logs" / "app.log"
-            while time.time() < deadline and not opened:
-                time.sleep(3)
-                opened = "Engine starting" in log_file.read_text(encoding="utf-8", errors="replace").split("RVC Voice")[-1] \
-                    and (HOME / "logs" / "engine.log").exists() \
-                    and "/app " in (HOME / "logs" / "engine.log").read_text(encoding="utf-8", errors="replace")
-            time.sleep(4)
-            screenshot("window-2-app.png")
-            check("window opens the app page", opened, "the engine served /app to the window")
-            fallback = "falling back to the browser" in log_file.read_text(encoding="utf-8", errors="replace")
-            check("embedded window (no browser fallback)", not fallback)
-        finally:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(win.pid)], capture_output=True)
+        window_phase(env)
     finally:
         if app.poll() is None:
             app.kill()
@@ -225,6 +155,113 @@ def main():
             src = HOME / "logs" / name
             if src.exists():
                 (OUT / name).write_text(src.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+
+
+def audio_phase(engine, audio_devices, wav):
+    if audio_devices["cable"]:
+        import numpy as np
+        import sounddevice as sd
+
+        status, body = post(engine + "/audio/power", {"on": True})
+        check("switch on", status == 200 and body.get("on") is True, str(body)[:300])
+        time.sleep(6)  # first frames: buffers allocate, the model warms up
+        # Record what a game would hear: the cable's other end
+        api = next(i for i, a in enumerate(sd.query_hostapis()) if a["name"] == "Windows WASAPI")
+        rec_dev = next(
+            i
+            for i, d in enumerate(sd.query_devices())
+            if d["hostapi"] == api and d["max_input_channels"] > 0 and "CABLE Output" in d["name"]
+        )
+        rate = int(sd.query_devices(rec_dev)["default_samplerate"])
+        rec_channels = min(2, sd.query_devices(rec_dev)["max_input_channels"])
+
+        def record(seconds):
+            data = sd.rec(
+                int(seconds * rate),
+                samplerate=rate,
+                channels=rec_channels,
+                device=rec_dev,
+                dtype="float32",
+                extra_settings=sd.WasapiSettings(auto_convert=True),
+            )
+            sd.wait()
+            return data.mean(axis=1)
+
+        rec = record(8)
+        rms, peak = float(np.sqrt(np.mean(rec**2))), float(np.abs(rec).max())
+        st = get(engine + "/audio/status")
+        health = get(engine + "/health")
+        print("status while on:", st)
+        print(
+            f"recorded from CABLE Output: rms {rms:.4f} peak {peak:.3f}; "
+            f"processing {health['avg_inference_ms']} ms per {health['frame_samples'] / 48:.0f} ms frame; "
+            f"underruns {st['underruns']}"
+        )
+        check("converted audio reaches CABLE Output", rms > 0.003, f"rms {rms:.4f}")
+        check("no audio error while on", st["on"] and not st["error"], str(st["error"]))
+        status, body = post(engine + "/audio/power", {"on": False})
+        check("switch off", status == 200 and body.get("on") is False)
+
+        # Self check through a real Windows microphone device. The machine's only devices are the
+        # cable's two ends, so: play the WAV into the cable, let the engine record the cable's other
+        # end as its microphone, and listen for its converted playback coming back through the cable.
+        mic_name = next(d["name"] for d in audio_devices["inputs"] if "CABLE Output" in d["name"])
+        status, body = post(engine + "/audio/settings", {"input": mic_name, "monitor": audio_devices["cable"]})
+        check("choose devices", status == 200, str(body)[:200])
+        with wave.open(str(wav)) as w:
+            tone = np.frombuffer(w.readframes(w.getnframes()), np.int16).astype(np.float32) / 32768
+        out_dev = next(
+            i
+            for i, d in enumerate(sd.query_devices())
+            if d["hostapi"] == api and d["max_output_channels"] > 0 and "CABLE Input" in d["name"]
+        )
+        sd.play(tone[: int(4.5 * 48000)], 48000, device=out_dev, extra_settings=sd.WasapiSettings(auto_convert=True))
+        status, body = post(engine + "/audio/test", {"seconds": 4})
+        check("self check starts recording", status == 200 and body.get("test") == "recording", str(body)[:200])
+        mic_level, deadline = 0.0, time.time() + 30
+        while time.time() < deadline:
+            st = get(engine + "/audio/status")
+            mic_level = max(mic_level, st["input_level"])
+            if st["test"] != "recording":
+                break
+            time.sleep(0.3)
+        sd.stop()
+        check("engine hears the Windows microphone device", mic_level > 0.003, f"peak level {mic_level:.4f}")
+        check("self check plays back", st["test"] == "playing", st["test"])
+        rms = float(np.sqrt(np.mean(record(3) ** 2)))
+        check("self-check playback is audible", rms > 0.003, f"rms {rms:.4f}")
+        for _ in range(40):
+            st = get(engine + "/audio/status")
+            if st["test"] == "idle":
+                break
+            time.sleep(0.5)
+        check("self check finishes", st["test"] == "idle" and not st["error"], str(st["error"]))
+    else:
+        check("VB-Cable visible to the engine", False, "no CABLE Input device")
+
+
+def window_phase(env):
+    # The real window: already set up, so it should go straight to the app page
+    win = subprocess.Popen([str(EXE)], env=env)
+    try:
+        time.sleep(4)
+        screenshot("window-1-starting.png")
+        deadline, opened = time.time() + 240, False
+        log_file = HOME / "logs" / "app.log"
+        while time.time() < deadline and not opened:
+            time.sleep(3)
+            opened = (
+                "Engine starting" in log_file.read_text(encoding="utf-8", errors="replace").split("RVC Voice")[-1]
+                and (HOME / "logs" / "engine.log").exists()
+                and "/app " in (HOME / "logs" / "engine.log").read_text(encoding="utf-8", errors="replace")
+            )
+        time.sleep(4)
+        screenshot("window-2-app.png")
+        check("window opens the app page", opened, "the engine served /app to the window")
+        fallback = "falling back to the browser" in log_file.read_text(encoding="utf-8", errors="replace")
+        check("embedded window (no browser fallback)", not fallback)
+    finally:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(win.pid)], capture_output=True)
 
 
 if __name__ == "__main__":
