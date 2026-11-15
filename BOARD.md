@@ -6,6 +6,7 @@ Format: `- [mac|pc] task — files it touches`
 - [pc] Test setup/windows/*.bat on a real Windows machine (written by mac while pc was offline; untested): client install/start, and server install/start if an NVIDIA box is available — setup/windows/
 
 ## In progress
+- [mac] One-PC Windows desktop app (.exe): installs everything on a PC with an NVIDIA GPU, runs server + local mic/VB-Cable audio in one process, built and tested by GitHub Actions — desktop/, server/ (new local_audio.py, app.html), .github/workflows/. Does not touch client/.
 
 ## Done
 - [mac] setup/: self-hosting guide, Mac install/start (tested from a fresh clone), Windows scripts (untested), model download from GitHub release models-v1 (Narrator, SHA-256 verified) — setup/
