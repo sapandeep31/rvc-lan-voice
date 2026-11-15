@@ -8,12 +8,15 @@ Each output has a small jitter buffer: frames arrive one whole frame at a time a
 (model time varies), while the device drains continuously. Gaps (underruns) are counted; surplus delay
 is cut out only during pauses in speech.
 """
+import functools
 import json
 import logging
 import os
+import sys
 import threading
 import time
 import wave
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +45,16 @@ TEST_INPUT_PREFIX = "wav:"               # automated tests: stream a WAV file as
 
 class AudioError(RuntimeError):
     """A problem the user can fix (device missing, cable not installed); the message is shown in the app."""
+
+
+def on_audio_thread(method):
+    """Run a LocalAudio method on the thread that owns the sound devices (see LocalAudio._init_audio_thread)."""
+    @functools.wraps(method)
+    def wrapper(self, *args):
+        if threading.current_thread() is self.io_thread:
+            return method(self, *args)
+        return self.io.submit(method, self, *args).result()
+    return wrapper
 
 
 def _extra_settings(device: dict):
@@ -201,6 +214,8 @@ class LocalAudio:
             with open(settings_path, "r", encoding="utf-8") as f:
                 self.settings.update(json.load(f))
 
+        self.io_thread = None
+        self.io = ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio-io", initializer=self._init_audio_thread)
         self.lock = threading.RLock()   # every state change (power, monitor, devices, test) holds this
         self.cable_on = False
         self.monitor_on = False
@@ -217,11 +232,21 @@ class LocalAudio:
         self.test_frames: list[np.ndarray] = []
         self.test_until = 0.0
 
+    def _init_audio_thread(self):
+        # On Windows, PortAudio hands a stream's COM objects to its audio thread when the stream starts, which
+        # only works if the thread starting it has COM initialised. Web-server worker threads do not, so one
+        # thread that does owns every device operation.
+        self.io_thread = threading.current_thread()
+        if sys.platform == "win32":
+            import ctypes
+            ctypes.windll.ole32.CoInitializeEx(None, 0)   # COINIT_MULTITHREADED
+
     # ---- devices ----------------------------------------------------------------------------------
     @property
     def streaming(self) -> bool:
         return self.source is not None
 
+    @on_audio_thread
     def devices(self) -> dict:
         with self.lock:
             if not self.streaming and self.test_state == "idle":
@@ -253,12 +278,14 @@ class LocalAudio:
         return device
 
     # ---- state ------------------------------------------------------------------------------------
+    @on_audio_thread
     def set_power(self, on: bool):
         with self.lock:
             self.error = None
             self.cable_on = on
             self._apply()
 
+    @on_audio_thread
     def set_monitor(self, on: bool):
         with self.lock:
             if self.test_state != "idle":
@@ -267,6 +294,7 @@ class LocalAudio:
             self.monitor_on = on
             self._apply()
 
+    @on_audio_thread
     def update_settings(self, changes: dict):
         with self.lock:
             self.error = None
@@ -279,6 +307,7 @@ class LocalAudio:
                 self._close_all()   # reopen on the newly chosen devices
                 self._apply()
 
+    @on_audio_thread
     def start_test(self, seconds: float):
         with self.lock:
             if self.test_state != "idle":
@@ -367,6 +396,7 @@ class LocalAudio:
         if self.source is not None:
             self._stop_input()
 
+    @on_audio_thread
     def shutdown(self):
         with self.lock:
             self.cable_on = self.monitor_on = False
@@ -380,7 +410,7 @@ class LocalAudio:
             self.cond.notify()
 
     def _on_mic_stopped(self):
-        # Called on PortAudio's thread when the device goes away: switch off from another thread
+        # Called on PortAudio's thread when the device goes away: switch off on the audio thread
         def fail():
             with self.lock:
                 if self.source is None:
@@ -390,7 +420,7 @@ class LocalAudio:
                 self.test_state = "idle"
                 self._close_all()
                 self.error = "The microphone stopped (was it unplugged?). Check Devices, then switch on again."
-        threading.Thread(target=fail, name="local-audio-fail", daemon=True).start()
+        self.io.submit(fail)
 
     def _take_frame(self) -> np.ndarray | None:
         with self.cond:
@@ -435,17 +465,25 @@ class LocalAudio:
         audio = np.concatenate(self.test_frames)
         self.test_frames = []
         try:
-            with self.lock:
-                self._apply()   # the recording is over: release the mic unless the cable is on
-                line = OutputLine(self._device("output", "monitor", "headphones or speakers"))
+            line = self._open_test_line()
             line.push(audio)
             time.sleep((PREFILL + len(audio)) / SAMPLE_RATE + 0.3)
-            line.close()
+            self._close_line(line)
         except (AudioError, sd.PortAudioError) as e:
             logger.error(f"Could not play the test recording: {e}")
             self.error = str(e)
         finally:
             self.test_state = "idle"
+
+    @on_audio_thread
+    def _open_test_line(self) -> OutputLine:
+        with self.lock:
+            self._apply()   # the recording is over: release the mic unless the cable is on
+            return OutputLine(self._device("output", "monitor", "headphones or speakers"))
+
+    @on_audio_thread
+    def _close_line(self, line: OutputLine):
+        line.close()
 
     def status(self) -> dict:
         cable = self.cable_line
