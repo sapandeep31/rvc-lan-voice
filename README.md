@@ -1,5 +1,24 @@
 # Set up your own voice changer
 
+There are two ways to run it:
+
+- **One Windows PC (easiest):** the RVC Voice app. Needs an NVIDIA graphics card. See the next section.
+- **Two machines:** a Mac or second PC runs the voice model so your gaming PC keeps its full FPS. See "Two machines" below.
+
+## One Windows PC: the RVC Voice app
+
+1. Download [**RVCVoice.exe**](https://github.com/sapandeep31/rvc-lan-voice/releases/download/app-v1.0.0/RVCVoice.exe) and open it.
+   Windows shows "Windows protected your PC" because the app is not signed: click **More info**, then **Run anyway**, and allow it to make changes.
+2. Pick your microphone and your headphones, then press **Install and start**. It downloads about 6 GB once
+   (10 to 20 minutes) and installs everything itself, including the VB-Cable virtual audio cable. If Windows asks to install the driver, click **Install**.
+3. When the app opens, press the round button to switch the voice changer on.
+4. In Discord or your game, choose **CABLE Output (VB-Audio Virtual Cable)** as the microphone.
+
+The app has a **Self check** tab (record 5 seconds and hear your new voice), a **Voice** tab with the sliders
+described under "Tune the voice" below, and a **Devices** tab. More detail: [desktop/README.md](desktop/README.md).
+
+## Two machines
+
 Your mic goes from the PC into a **server** that runs the AI voice model, and the converted voice comes
 back into the PC as a virtual microphone that Discord and games can use.
 

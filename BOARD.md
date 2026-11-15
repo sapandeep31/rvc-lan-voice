@@ -3,12 +3,13 @@
 Format: `- [mac|pc] task — files it touches`
 
 ## Up next
+- [pc] Try RVCVoice.exe (release app-v1.0.0) on the real gaming PC: the NVIDIA path, the admin/SmartScreen prompts and the VB-Cable trust prompt have only run on a GPU-less CI machine — desktop/
 - [pc] Test setup/windows/*.bat on a real Windows machine (written by mac while pc was offline; untested): client install/start, and server install/start if an NVIDIA box is available — setup/windows/
 
 ## In progress
-- [mac] One-PC Windows desktop app (.exe): installs everything on a PC with an NVIDIA GPU, runs server + local mic/VB-Cable audio in one process, built and tested by GitHub Actions — desktop/, server/ (new local_audio.py, app.html), .github/workflows/. Does not touch client/.
 
 ## Done
+- [mac] One-PC Windows desktop app: `RVCVoice.exe` (release app-v1.0.0) installs uv, Python, PyTorch for the NVIDIA card, VB-Cable and Narrator, then runs the engine with local mic/cable audio (`server/local_audio.py`, `/app` page: on/off, panel, self check, devices). GitHub Actions builds it and runs a full install + audio test on Windows (`.github/workflows/windows-app.yml`). client/ untouched — desktop/, server/, .github/
 - [mac] setup/: self-hosting guide, Mac install/start (tested from a fresh clone), Windows scripts (untested), model download from GitHub release models-v1 (Narrator, SHA-256 verified) — setup/
 - [pc] Run client against the Mac server, report latency/errors/audio quality — client/, config.json "client" (server_ip local only)
   - 2026-11-14 handed to user: client follows panel chunk_size, Desktop shortcuts for run_client.bat / mic_check.bat / panel. Discord/games mic = "CABLE Output (VB-Audio Virtual Cable)".
@@ -22,5 +23,6 @@ Format: `- [mac|pc] task — files it touches`
 - [mac] Lower latency + control panel: adaptive frame size, fcpe + fp16 (~47 ms/chunk), crossfade 0.05 s, /panel with synced sliders, noise-gate calibration, concurrent-client crash fix — server/, config.json "server" (cc8214c, 9fdfbb2)
 
 ## Notes / handoffs
+- server.py now reads `RVC_CONFIG` (config path) and honours `model_dir` / `pretrain_dir` from config; `/health` gained `init_error`; `connected_clients` also counts local audio. `/ws/voice` and `/settings` are unchanged.
 - Mac server runs on port 8010 on this Mac (Docker holds 8000); committed config still says 8000, override locally.
 - chunk_size is now client-only (server adapts to any multiple of 128). Today: chunk 40 (~216 ms mouth-to-Discord) on Wi-Fi; chunk 32 (~150-170 ms) once the Mac's AWDL spikes are gone (sudo ifconfig awdl0 down, user's call).

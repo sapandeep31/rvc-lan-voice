@@ -1,7 +1,8 @@
 # RVC Voice desktop app (Windows, one PC)
 
 `RVCVoice.exe` runs the whole voice changer on one Windows PC with an NVIDIA graphics card: no second
-machine, no command line. Download it from the repo's [Releases](https://github.com/sapandeep31/rvc-lan-voice/releases).
+machine, no command line. Download:
+[RVCVoice.exe](https://github.com/sapandeep31/rvc-lan-voice/releases/download/app-v1.0.0/RVCVoice.exe) (release `app-v1.0.0`).
 
 ## What it does
 
@@ -44,3 +45,13 @@ GitHub Actions (`.github/workflows/windows-app.yml`) builds the .exe on every ch
 converted into the cable, and the app window. The tested .exe is that run's `RVCVoice` artifact.
 
 Logs: `%LOCALAPPDATA%\RVCVoice\logs\app.log` (setup) and `engine.log` (voice engine).
+
+## What the automated test covers, and what it cannot
+
+Covered on a clean Windows machine: the .exe starts, installs everything (including VB-Cable), loads the
+voice, sends converted audio into the cable, records through a real Windows microphone device, plays the
+self check back, opens the app window, and stops the engine when it closes.
+
+Not covered: the test machine has no NVIDIA card, so conversion ran on the processor there (the GPU builds
+of PyTorch are only checked to resolve). The administrator prompt, the SmartScreen warning and Windows'
+driver-trust prompt need a person, so they are skipped or pre-answered in the test.
